@@ -233,6 +233,20 @@ func (m *Meta) DataDir() string {
 }
 
 const (
+	// FIXME
+	ConciseDiffExperimentEnvVar = "TF_EXPERIMENT_CONCISE_DIFF"
+)
+
+func (m *Meta) ConciseDiff() bool {
+	if envVar := os.Getenv(ConciseDiffExperimentEnvVar); envVar != "" {
+		if v, err := strconv.ParseBool(envVar); err == nil {
+			return v
+		}
+	}
+	return false
+}
+
+const (
 	// InputModeEnvVar is the environment variable that, if set to "false" or
 	// "0", causes terraform commands to behave as if the `-input=false` flag was
 	// specified.

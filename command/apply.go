@@ -26,6 +26,7 @@ type ApplyCommand struct {
 
 func (c *ApplyCommand) Run(args []string) int {
 	var destroyForce, refresh, autoApprove bool
+
 	args = c.Meta.process(args)
 	cmdName := "apply"
 	if c.Destroy {
@@ -146,6 +147,7 @@ func (c *ApplyCommand) Run(args []string) int {
 	opReq.DestroyForce = destroyForce
 	opReq.PlanFile = planFile
 	opReq.PlanRefresh = refresh
+	opReq.Concise = c.ConciseDiff()
 	opReq.Type = backend.OperationTypeApply
 
 	opReq.ConfigLoader, err = c.initConfigLoader()

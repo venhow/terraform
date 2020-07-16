@@ -178,7 +178,7 @@ func (b *Local) opPlan(
 			return
 		}
 
-		b.renderPlan(plan, baseState, priorState, schemas)
+		b.renderPlan(plan, baseState, priorState, schemas, op.Concise)
 
 		// If we've accumulated any warnings along the way then we'll show them
 		// here just before we show the summary and next steps. If we encountered
@@ -205,8 +205,8 @@ func (b *Local) opPlan(
 	}
 }
 
-func (b *Local) renderPlan(plan *plans.Plan, baseState *states.State, priorState *states.State, schemas *terraform.Schemas) {
-	RenderPlan(plan, baseState, priorState, schemas, b.CLI, b.Colorize())
+func (b *Local) renderPlan(plan *plans.Plan, baseState *states.State, priorState *states.State, schemas *terraform.Schemas, concise bool) {
+	RenderPlan(plan, baseState, priorState, schemas, concise, b.CLI, b.Colorize())
 }
 
 // RenderPlan renders the given plan to the given UI.
@@ -229,7 +229,7 @@ func (b *Local) renderPlan(plan *plans.Plan, baseState *states.State, priorState
 // output values will not currently be rendered because their prior values
 // are currently stored only in the prior state. (see the docstring for
 // func planHasSideEffects for why this is and when that might change)
-func RenderPlan(plan *plans.Plan, baseState *states.State, priorState *states.State, schemas *terraform.Schemas, ui cli.Ui, colorize *colorstring.Colorize) {
+func RenderPlan(plan *plans.Plan, baseState *states.State, priorState *states.State, schemas *terraform.Schemas, concise bool, ui cli.Ui, colorize *colorstring.Colorize) {
 	counts := map[plans.Action]int{}
 	var rChanges []*plans.ResourceInstanceChangeSrc
 	for _, change := range plan.Changes.Resources {
@@ -313,6 +313,7 @@ func RenderPlan(plan *plans.Plan, baseState *states.State, priorState *states.St
 			tainted,
 			rSchema,
 			colorize,
+			concise,
 		))
 	}
 

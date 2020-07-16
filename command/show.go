@@ -90,6 +90,7 @@ func (c *ShowCommand) Run(args []string) int {
 	opReq.PlanFile = planFile
 	opReq.ConfigLoader, err = c.initConfigLoader()
 	opReq.AllowUnsetVariables = true
+	opReq.Concise = c.ConciseDiff()
 	if err != nil {
 		diags = diags.Append(err)
 		c.showDiagnostics(diags)
@@ -162,7 +163,7 @@ func (c *ShowCommand) Run(args []string) int {
 		// We're setting priorState to null because a saved plan file only
 		// records the base state (possibly updated by refresh), not the
 		// prior state (direct result of the previous apply).
-		localBackend.RenderPlan(plan, stateFile.State, nil, schemas, c.Ui, c.Colorize())
+		localBackend.RenderPlan(plan, stateFile.State, nil, schemas, opReq.Concise, c.Ui, c.Colorize())
 		return 0
 	}
 

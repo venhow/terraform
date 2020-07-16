@@ -117,7 +117,7 @@ func (b *Local) opApply(
 
 			if !trivialPlan {
 				// Display the plan of what we are going to apply/destroy.
-				b.renderPlan(plan, runningOp.State, priorState, tfCtx.Schemas())
+				b.renderPlan(plan, runningOp.State, priorState, tfCtx.Schemas(), op.Concise)
 				b.CLI.Output("")
 			}
 
