@@ -156,6 +156,7 @@ type Variable struct {
 	DeclaredType string `mapstructure:"type"`
 	Default      interface{}
 	Description  string
+	Sensitive    bool
 }
 
 // Local is a local value defined within the configuration.
