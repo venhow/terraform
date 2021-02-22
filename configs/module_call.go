@@ -31,6 +31,8 @@ type ModuleCall struct {
 }
 
 func decodeModuleBlock(block *hcl.Block, override bool) (*ModuleCall, hcl.Diagnostics) {
+	var diags hcl.Diagnostics
+
 	mc := &ModuleCall{
 		Name:      block.Labels[0],
 		DeclRange: block.DefRange,
@@ -41,7 +43,8 @@ func decodeModuleBlock(block *hcl.Block, override bool) (*ModuleCall, hcl.Diagno
 		schema = schemaForOverrides(schema)
 	}
 
-	content, remain, diags := block.Body.PartialContent(schema)
+	content, remain, moreDiags := block.Body.PartialContent(schema)
+	diags = append(diags, moreDiags...)
 	mc.Config = remain
 
 	if !hclsyntax.ValidIdentifier(mc.Name) {

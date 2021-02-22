@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/helper/acctest"
+	"github.com/hashicorp/terraform/internal/legacy/helper/acctest"
 )
 
 func TestBackend_impl(t *testing.T) {
@@ -123,7 +123,44 @@ func TestBackendSASTokenBasic(t *testing.T) {
 	backend.TestBackendStates(t, b)
 }
 
-func TestBackendServicePrincipalBasic(t *testing.T) {
+func TestBackendServicePrincipalClientCertificateBasic(t *testing.T) {
+	testAccAzureBackend(t)
+
+	clientCertPassword := os.Getenv("ARM_CLIENT_CERTIFICATE_PASSWORD")
+	clientCertPath := os.Getenv("ARM_CLIENT_CERTIFICATE_PATH")
+	if clientCertPath == "" {
+		t.Skip("Skipping since `ARM_CLIENT_CERTIFICATE_PATH` is not specified!")
+	}
+
+	rs := acctest.RandString(4)
+	res := testResourceNames(rs, "testState")
+	armClient := buildTestClient(t, res)
+
+	ctx := context.TODO()
+	err := armClient.buildTestResources(ctx, &res)
+	defer armClient.destroyTestResources(ctx, res)
+	if err != nil {
+		t.Fatalf("Error creating Test Resources: %q", err)
+	}
+
+	b := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(map[string]interface{}{
+		"storage_account_name":        res.storageAccountName,
+		"container_name":              res.storageContainerName,
+		"key":                         res.storageKeyName,
+		"resource_group_name":         res.resourceGroup,
+		"subscription_id":             os.Getenv("ARM_SUBSCRIPTION_ID"),
+		"tenant_id":                   os.Getenv("ARM_TENANT_ID"),
+		"client_id":                   os.Getenv("ARM_CLIENT_ID"),
+		"client_certificate_password": clientCertPassword,
+		"client_certificate_path":     clientCertPath,
+		"environment":                 os.Getenv("ARM_ENVIRONMENT"),
+		"endpoint":                    os.Getenv("ARM_ENDPOINT"),
+	})).(*Backend)
+
+	backend.TestBackendStates(t, b)
+}
+
+func TestBackendServicePrincipalClientSecretBasic(t *testing.T) {
 	testAccAzureBackend(t)
 	rs := acctest.RandString(4)
 	res := testResourceNames(rs, "testState")
@@ -152,7 +189,7 @@ func TestBackendServicePrincipalBasic(t *testing.T) {
 	backend.TestBackendStates(t, b)
 }
 
-func TestBackendServicePrincipalCustomEndpoint(t *testing.T) {
+func TestBackendServicePrincipalClientSecretCustomEndpoint(t *testing.T) {
 	testAccAzureBackend(t)
 
 	// this is only applicable for Azure Stack.
@@ -221,6 +258,9 @@ func TestBackendAccessKeyLocked(t *testing.T) {
 
 	backend.TestBackendStateLocks(t, b1, b2)
 	backend.TestBackendStateForceUnlock(t, b1, b2)
+
+	backend.TestBackendStateLocksInWS(t, b1, b2, "foo")
+	backend.TestBackendStateForceUnlockInWS(t, b1, b2, "foo")
 }
 
 func TestBackendServicePrincipalLocked(t *testing.T) {
@@ -264,4 +304,7 @@ func TestBackendServicePrincipalLocked(t *testing.T) {
 
 	backend.TestBackendStateLocks(t, b1, b2)
 	backend.TestBackendStateForceUnlock(t, b1, b2)
+
+	backend.TestBackendStateLocksInWS(t, b1, b2, "foo")
+	backend.TestBackendStateForceUnlockInWS(t, b1, b2, "foo")
 }

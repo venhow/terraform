@@ -64,13 +64,15 @@ The Terraform team is not merging PRs for new state storage backends at the curr
 
 Please see the [CODEOWNERS](https://github.com/hashicorp/terraform/blob/master/CODEOWNERS) file for the status of a given backend. Community members with an interest in a particular standard backend are welcome to help maintain it.
 
-Currently, merging state storage backends places a significant burden on the Terraform team. The team must setup an environment and cloud service provider account, or a new database/storage/key-value service, in order to build and test remote state storage backends. The time and complexity of doing so prevents us from moving Terraform forward in other ways.
+Currently, merging state storage backends places a significant burden on the Terraform team. The team must set up an environment and cloud service provider account, or a new database/storage/key-value service, in order to build and test remote state storage backends. The time and complexity of doing so prevents us from moving Terraform forward in other ways.
 
 We are working to remove ourselves from the critical path of state storage backends by moving them towards a plugin model. In the meantime, we won't be accepting new remote state backends into Terraform.
 
 #### Provisioners
 
-Provisioners are an area of concern in Terraform for a number of reasons. Chiefly, they are often used in the place of configuration management tools or custom providers.
+Provisioners are an area of concern in Terraform for a number of reasons. Chiefly, they are often used in the place of configuration management tools or custom providers. 
+
+There are two main types of provisioners in Terraform, the generic provisioners (`file`,`local-exec`, and `remote-exec`) and the tool-specific provisioners (`chef`, `habbitat`, `puppet` & `salt-masterless`). **The tool-specific provisioners [are deprecated](https://discuss.hashicorp.com/t/notice-terraform-to-begin-deprecation-of-vendor-tool-specific-provisioners-starting-in-terraform-0-13-4/13997).** In practice this means we will not be accepting PRs for these areas of the codebase. 
 
 From our [documentation](https://www.terraform.io/docs/provisioners/index.html):
 
@@ -201,7 +203,7 @@ make protobuf
 
 ## External Dependencies
 
-Terraform uses Go Modules for dependency management, but currently uses "vendoring" to include copies of all of the external library dependencies in the Terraform repository to allow builds to complete even if third-party dependency sources are unavailable.
+Terraform uses Go Modules for dependency management.
 
 Our dependency licensing policy for Terraform excludes proprietary licenses and "copyleft"-style licenses. We accept the common Mozilla Public License v2, MIT License, and BSD licenses. We will consider other open source licenses in similar spirit to those three, but if you plan to include such a dependency in a contribution we'd recommend opening a GitHub issue first to discuss what you intend to implement and what dependencies it will require so that the Terraform team can review the relevant licenses to for whether they meet our licensing needs.
 
@@ -213,24 +215,23 @@ go get github.com/hashicorp/hcl/v2@2.0.0
 
 This command will download the requested version (2.0.0 in the above example) and record that version selection in the `go.mod` file. It will also record checksums for the module in the `go.sum`.
 
-To complete the dependency change, clean up any redundancy in the module metadata files and resynchronize the `vendor` directory with the new package selections by running the following commands:
+To complete the dependency change, clean up any redundancy in the module metadata files by running:
 
 ```
 go mod tidy
-go mod vendor
 ```
 
-To ensure that the vendoring has worked correctly, be sure to run the unit test suite at least once in *vendoring* mode, where Go will use the vendored dependencies to build the test programs:
+To ensure that the upgrade has worked correctly, be sure to run the unit test suite at least once:
 
 ```
-go test -mod=vendor ./...
+go test ./...
 ```
 
 Because dependency changes affect a shared, top-level file, they are more likely than some other change types to become conflicted with other proposed changes during the code review process. For that reason, and to make dependency changes more visible in the change history, we prefer to record dependency changes as separate commits that include only the results of the above commands and the minimal set of changes to Terraform's own code for compatibility with the new version:
 
 ```
-git add go.mod go.sum vendor
-git commit -m "vendor: go get github.com/hashicorp/hcl/v2@2.0.0"
+git add go.mod go.sum
+git commit -m "go get github.com/hashicorp/hcl/v2@2.0.0"
 ```
 
 You can then make use of the new or updated dependency in new code added in subsequent commits.

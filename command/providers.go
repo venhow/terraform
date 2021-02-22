@@ -21,7 +21,7 @@ func (c *ProvidersCommand) Help() string {
 }
 
 func (c *ProvidersCommand) Synopsis() string {
-	return "Prints a tree of the providers used in the configuration"
+	return "Show the providers required for this configuration"
 }
 
 func (c *ProvidersCommand) Run(args []string) int {
@@ -82,8 +82,15 @@ func (c *ProvidersCommand) Run(args []string) int {
 		return 1
 	}
 
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
+
 	// Get the state
-	env := c.Workspace()
+	env, err := c.Workspace()
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+		return 1
+	}
 	s, err := b.StateMgr(env)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load state: %s", err))

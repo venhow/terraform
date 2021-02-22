@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configschema"
+	"github.com/hashicorp/terraform/internal/getproviders"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -48,6 +49,7 @@ type moduleCall struct {
 	ForEachExpression *expression            `json:"for_each_expression,omitempty"`
 	Module            module                 `json:"module,omitempty"`
 	VersionConstraint string                 `json:"version_constraint,omitempty"`
+	DependsOn         []string               `json:"depends_on,omitempty"`
 }
 
 // variables is the JSON representation of the variables provided to the current
@@ -138,19 +140,61 @@ func marshalProviderConfigs(
 		return
 	}
 
+	// We want to determine only the provider requirements from this module,
+	// ignoring any descendants.  Disregard any diagnostics when determining
+	// requirements because we want this marshalling to succeed even if there
+	// are invalid constraints.
+	reqs, _ := c.ProviderRequirementsShallow()
+
+	// Add an entry for each provider configuration block in the module.
 	for k, pc := range c.Module.ProviderConfigs {
 		providerFqn := c.ProviderForConfigAddr(addrs.LocalProviderConfig{LocalName: pc.Name})
 		schema := schemas.ProviderConfig(providerFqn)
-		p := providerConfig{
-			Name:              pc.Name,
-			Alias:             pc.Alias,
-			ModuleAddress:     c.Path.String(),
-			Expressions:       marshalExpressions(pc.Config, schema),
-			VersionConstraint: pc.Version.Required.String(),
-		}
-		absPC := opaqueProviderKey(k, c.Path.String())
 
-		m[absPC] = p
+		p := providerConfig{
+			Name:          pc.Name,
+			Alias:         pc.Alias,
+			ModuleAddress: c.Path.String(),
+			Expressions:   marshalExpressions(pc.Config, schema),
+		}
+
+		// Store the fully resolved provider version constraint, rather than
+		// using the version argument in the configuration block. This is both
+		// future proof (for when we finish the deprecation of the provider config
+		// version argument) and more accurate (as it reflects the full set of
+		// constraints, in case there are multiple).
+		if vc, ok := reqs[providerFqn]; ok {
+			p.VersionConstraint = getproviders.VersionConstraintsString(vc)
+		}
+
+		key := opaqueProviderKey(k, c.Path.String())
+
+		m[key] = p
+	}
+
+	// Ensure that any required providers with no associated configuration
+	// block are included in the set.
+	for k, pr := range c.Module.ProviderRequirements.RequiredProviders {
+		// If there exists a value for this provider, we have nothing to add
+		// to it, so skip.
+		key := opaqueProviderKey(k, c.Path.String())
+		if _, exists := m[key]; exists {
+			continue
+		}
+
+		// Given no provider configuration block exists, the only fields we can
+		// fill here are the local name, module address, and version
+		// constraints.
+		p := providerConfig{
+			Name:          pr.Name,
+			ModuleAddress: c.Path.String(),
+		}
+
+		if vc, ok := reqs[pr.Type]; ok {
+			p.VersionConstraint = getproviders.VersionConstraintsString(vc)
+		}
+
+		m[key] = p
 	}
 
 	// Must also visit our child modules, recursively.
@@ -269,6 +313,20 @@ func marshalModuleCall(c *configs.Config, mc *configs.ModuleCall, schemas *terra
 	ret.Expressions = marshalExpressions(mc.Config, schema)
 	module, _ := marshalModule(c, schemas, mc.Name)
 	ret.Module = module
+
+	if len(mc.DependsOn) > 0 {
+		dependencies := make([]string, len(mc.DependsOn))
+		for i, d := range mc.DependsOn {
+			ref, diags := addrs.ParseRef(d)
+			// we should not get an error here, because `terraform validate`
+			// would have complained well before this point, but if we do we'll
+			// silenty skip it.
+			if !diags.HasErrors() {
+				dependencies[i] = ref.Subject.String()
+			}
+		}
+		ret.DependsOn = dependencies
+	}
 
 	return ret
 }

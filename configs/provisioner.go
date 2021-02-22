@@ -31,6 +31,17 @@ func decodeProvisionerBlock(block *hcl.Block) (*Provisioner, hcl.Diagnostics) {
 	content, config, diags := block.Body.PartialContent(provisionerBlockSchema)
 	pv.Config = config
 
+	switch pv.Type {
+	case "chef", "habitat", "puppet", "salt-masterless":
+		diags = append(diags, &hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  fmt.Sprintf("The \"%s\" provisioner has been removed", pv.Type),
+			Detail:   fmt.Sprintf("The \"%s\" provisioner was deprecated in Terraform 0.13.4 has been removed from Terraform. Visit https://learn.hashicorp.com/collections/terraform/provision for alternatives to using provisioners that are a better fit for the Terraform workflow.", pv.Type),
+			Subject:  &pv.TypeRange,
+		})
+		return nil, diags
+	}
+
 	if attr, exists := content.Attributes["when"]; exists {
 		expr, shimDiags := shimTraversalInString(attr.Expr, true)
 		diags = append(diags, shimDiags...)

@@ -66,8 +66,12 @@ func (r *Resource) Addr() addrs.Resource {
 // config addr if an explicit "provider" argument was not provided.
 func (r *Resource) ProviderConfigAddr() addrs.LocalProviderConfig {
 	if r.ProviderConfigRef == nil {
+		// If no specific "provider" argument is given, we want to look up the
+		// provider config where the local name matches the implied provider
+		// from the resource type. This may be different from the resource's
+		// provider type.
 		return addrs.LocalProviderConfig{
-			LocalName: r.Provider.Type,
+			LocalName: r.Addr().ImpliedProvider(),
 		}
 	}
 
@@ -87,13 +91,6 @@ func decodeResourceBlock(block *hcl.Block) (*Resource, hcl.Diagnostics) {
 		TypeRange: block.LabelRanges[0],
 		Managed:   &ManagedResource{},
 	}
-
-	// Produce deprecation messages for any pre-0.12-style
-	// single-interpolation-only expressions. We do this up front here because
-	// then we can also catch instances inside special blocks like "connection",
-	// before PartialContent extracts them.
-	moreDiags := warnForDeprecatedInterpolationsInBody(block.Body)
-	diags = append(diags, moreDiags...)
 
 	content, remain, moreDiags := block.Body.PartialContent(resourceBlockSchema)
 	diags = append(diags, moreDiags...)
@@ -207,9 +204,9 @@ func decodeResourceBlock(block *hcl.Block) (*Resource, hcl.Diagnostics) {
 							r.Managed.IgnoreAllChanges = true
 							ignoreAllRange = expr.Range()
 							diags = append(diags, &hcl.Diagnostic{
-								Severity: hcl.DiagWarning,
-								Summary:  "Deprecated ignore_changes wildcard",
-								Detail:   "The [\"*\"] form of ignore_changes wildcard is deprecated. Use \"ignore_changes = all\" to ignore changes to all attributes.",
+								Severity: hcl.DiagError,
+								Summary:  "Invalid ignore_changes wildcard",
+								Detail:   "The [\"*\"] form of ignore_changes wildcard is was deprecated and is now invalid. Use \"ignore_changes = all\" to ignore changes to all attributes.",
 								Subject:  attr.Expr.Range().Ptr(),
 							})
 							continue
@@ -290,6 +287,7 @@ func decodeResourceBlock(block *hcl.Block) (*Resource, hcl.Diagnostics) {
 }
 
 func decodeDataBlock(block *hcl.Block) (*Resource, hcl.Diagnostics) {
+	var diags hcl.Diagnostics
 	r := &Resource{
 		Mode:      addrs.DataResourceMode,
 		Type:      block.Labels[0],
@@ -298,7 +296,8 @@ func decodeDataBlock(block *hcl.Block) (*Resource, hcl.Diagnostics) {
 		TypeRange: block.LabelRanges[0],
 	}
 
-	content, remain, diags := block.Body.PartialContent(dataBlockSchema)
+	content, remain, moreDiags := block.Body.PartialContent(dataBlockSchema)
+	diags = append(diags, moreDiags...)
 	r.Config = remain
 
 	if !hclsyntax.ValidIdentifier(r.Type) {

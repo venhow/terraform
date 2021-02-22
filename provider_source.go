@@ -153,7 +153,7 @@ func implicitProviderSource(services *disco.Disco) getproviders.Source {
 	// conventions for each platform:
 	//
 	//   XDG (Unix): lowercase of the first string, "terraform"
-	//   Windows:    two-level heirarchy of first two strings, "HashiCorp\Terraform"
+	//   Windows:    two-level hierarchy of first two strings, "HashiCorp\Terraform"
 	//   OS X:       reverse-DNS unique identifier, "io.terraform".
 	sysSpecificDirs := userdirs.ForApp("Terraform", "HashiCorp", "io.terraform")
 	for _, dir := range sysSpecificDirs.DataSearchPaths("plugins") {
@@ -216,7 +216,7 @@ func providerSourceForCLIConfigLocation(loc cliconfig.ProviderInstallationLocati
 			))
 			return nil, diags
 		}
-		return getproviders.NewHTTPMirrorSource(url), nil
+		return getproviders.NewHTTPMirrorSource(url, services.CredentialsSource()), nil
 
 	default:
 		// We should not get here because the set of cases above should
@@ -224,4 +224,15 @@ func providerSourceForCLIConfigLocation(loc cliconfig.ProviderInstallationLocati
 		// cliconfig.ProviderInstallationLocation implementations.
 		panic(fmt.Sprintf("unexpected provider source location type %T", loc))
 	}
+}
+
+func providerDevOverrides(configs []*cliconfig.ProviderInstallation) map[addrs.Provider]getproviders.PackageLocalDir {
+	if len(configs) == 0 {
+		return nil
+	}
+
+	// There should only be zero or one configurations, which is checked by
+	// the validation logic in the cliconfig package. Therefore we'll just
+	// ignore any additional configurations in here.
+	return configs[0].DevOverrides
 }

@@ -6,10 +6,11 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform/backend"
-	localBackend "github.com/hashicorp/terraform/backend/local"
+	"github.com/hashicorp/terraform/command/arguments"
 	"github.com/hashicorp/terraform/command/format"
 	"github.com/hashicorp/terraform/command/jsonplan"
 	"github.com/hashicorp/terraform/command/jsonstate"
+	"github.com/hashicorp/terraform/command/views"
 	"github.com/hashicorp/terraform/plans"
 	"github.com/hashicorp/terraform/plans/planfile"
 	"github.com/hashicorp/terraform/states/statefile"
@@ -67,6 +68,9 @@ func (c *ShowCommand) Run(args []string) int {
 		c.Ui.Error(ErrUnsupportedLocalOp)
 		return 1
 	}
+
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
 
 	// the show command expects the config dir to always be the cwd
 	cwd, err := os.Getwd()
@@ -130,7 +134,11 @@ func (c *ShowCommand) Run(args []string) int {
 			}
 		}
 	} else {
-		env := c.Workspace()
+		env, err := c.Workspace()
+		if err != nil {
+			c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+			return 1
+		}
 		stateFile, stateErr = getStateFromEnv(b, env)
 		if stateErr != nil {
 			c.Ui.Error(stateErr.Error())
@@ -139,7 +147,7 @@ func (c *ShowCommand) Run(args []string) int {
 	}
 
 	if plan != nil {
-		if jsonOutput == true {
+		if jsonOutput {
 			config := ctx.Config()
 			jsonPlan, err := jsonplan.Marshal(config, plan, stateFile, schemas)
 
@@ -151,22 +159,12 @@ func (c *ShowCommand) Run(args []string) int {
 			return 0
 		}
 
-		// FIXME: We currently call into the local backend for this, since
-		// the "terraform plan" logic lives there and our package call graph
-		// means we can't orient this dependency the other way around. In
-		// future we'll hopefully be able to refactor the backend architecture
-		// a little so that CLI UI rendering always happens in this "command"
-		// package rather than in the backends themselves, but for now we're
-		// accepting this oddity because "terraform show" is a less commonly
-		// used way to render a plan than "terraform plan" is.
-		// We're setting priorState to null because a saved plan file only
-		// records the base state (possibly updated by refresh), not the
-		// prior state (direct result of the previous apply).
-		localBackend.RenderPlan(plan, stateFile.State, nil, schemas, c.Ui, c.Colorize())
+		view := views.NewShow(arguments.ViewHuman, c.View)
+		view.Plan(plan, stateFile.State, schemas)
 		return 0
 	}
 
-	if jsonOutput == true {
+	if jsonOutput {
 		// At this point, it is possible that there is neither state nor a plan.
 		// That's ok, we'll just return an empty object.
 		jsonState, err := jsonstate.Marshal(stateFile, schemas)
@@ -208,7 +206,7 @@ Options:
 }
 
 func (c *ShowCommand) Synopsis() string {
-	return "Inspect Terraform state or plan"
+	return "Show the current state or a saved plan"
 }
 
 // getPlanFromPath returns a plan and statefile if the user-supplied path points

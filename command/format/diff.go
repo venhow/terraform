@@ -123,8 +123,16 @@ func ResourceChange(
 	changeV.Change.Before = objchange.NormalizeObjectFromLegacySDK(changeV.Change.Before, schema)
 	changeV.Change.After = objchange.NormalizeObjectFromLegacySDK(changeV.Change.After, schema)
 
-	bodyWritten := p.writeBlockBodyDiff(schema, changeV.Before, changeV.After, 6, path)
-	if bodyWritten {
+	// Now that the change is decoded, add back the marks at the defined paths
+	if len(change.BeforeValMarks) > 0 {
+		changeV.Change.Before = changeV.Change.Before.MarkWithPaths(change.BeforeValMarks)
+	}
+	if len(change.AfterValMarks) > 0 {
+		changeV.Change.After = changeV.Change.After.MarkWithPaths(change.AfterValMarks)
+	}
+
+	result := p.writeBlockBodyDiff(schema, changeV.Before, changeV.After, 6, path)
+	if result.bodyWritten {
 		buf.WriteString("\n")
 		buf.WriteString(strings.Repeat(" ", 4))
 	}
@@ -189,16 +197,25 @@ type blockBodyDiffPrinter struct {
 	color           *colorstring.Colorize
 	action          plans.Action
 	requiredReplace cty.PathSet
+	// verbose is set to true when using the "diff" printer to format state
+	verbose bool
+}
+
+type blockBodyDiffResult struct {
+	bodyWritten       bool
+	skippedAttributes int
+	skippedBlocks     int
 }
 
 const forcesNewResourceCaption = " [red]# forces replacement[reset]"
 
 // writeBlockBodyDiff writes attribute or block differences
 // and returns true if any differences were found and written
-func (p *blockBodyDiffPrinter) writeBlockBodyDiff(schema *configschema.Block, old, new cty.Value, indent int, path cty.Path) bool {
+func (p *blockBodyDiffPrinter) writeBlockBodyDiff(schema *configschema.Block, old, new cty.Value, indent int, path cty.Path) blockBodyDiffResult {
 	path = ctyEnsurePathCapacity(path, 1)
 
-	bodyWritten := false
+	result := blockBodyDiffResult{}
+
 	blankBeforeBlocks := false
 	{
 		attrNames := make([]string, 0, len(schema.Attributes))
@@ -229,8 +246,21 @@ func (p *blockBodyDiffPrinter) writeBlockBodyDiff(schema *configschema.Block, ol
 			oldVal := ctyGetAttrMaybeNull(old, name)
 			newVal := ctyGetAttrMaybeNull(new, name)
 
-			bodyWritten = true
-			p.writeAttrDiff(name, attrS, oldVal, newVal, attrNameLen, indent, path)
+			result.bodyWritten = true
+			skipped := p.writeAttrDiff(name, attrS, oldVal, newVal, attrNameLen, indent, path)
+			if skipped {
+				result.skippedAttributes++
+			}
+		}
+
+		if result.skippedAttributes > 0 {
+			noun := "attributes"
+			if result.skippedAttributes == 1 {
+				noun = "attribute"
+			}
+			p.buf.WriteString("\n")
+			p.buf.WriteString(strings.Repeat(" ", indent+2))
+			p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", result.skippedAttributes, noun)))
 		}
 	}
 
@@ -246,23 +276,35 @@ func (p *blockBodyDiffPrinter) writeBlockBodyDiff(schema *configschema.Block, ol
 			oldVal := ctyGetAttrMaybeNull(old, name)
 			newVal := ctyGetAttrMaybeNull(new, name)
 
-			bodyWritten = true
-			p.writeNestedBlockDiffs(name, blockS, oldVal, newVal, blankBeforeBlocks, indent, path)
+			result.bodyWritten = true
+			skippedBlocks := p.writeNestedBlockDiffs(name, blockS, oldVal, newVal, blankBeforeBlocks, indent, path)
+			if skippedBlocks > 0 {
+				result.skippedBlocks += skippedBlocks
+			}
 
 			// Always include a blank for any subsequent block types.
 			blankBeforeBlocks = true
 		}
+		if result.skippedBlocks > 0 {
+			noun := "blocks"
+			if result.skippedBlocks == 1 {
+				noun = "block"
+			}
+			p.buf.WriteString("\n")
+			p.buf.WriteString(strings.Repeat(" ", indent+2))
+			p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", result.skippedBlocks, noun)))
+		}
 	}
 
-	return bodyWritten
+	return result
 }
 
-func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.Attribute, old, new cty.Value, nameLen, indent int, path cty.Path) {
-	path = append(path, cty.GetAttrStep{Name: name})
-	p.buf.WriteString("\n")
-	p.buf.WriteString(strings.Repeat(" ", indent))
-	showJustNew := false
+// getPlanActionAndShow returns the action value
+// and a boolean for showJustNew. In this function we
+// modify the old and new values to remove any possible marks
+func getPlanActionAndShow(old cty.Value, new cty.Value) (plans.Action, bool) {
 	var action plans.Action
+	showJustNew := false
 	switch {
 	case old.IsNull():
 		action = plans.Create
@@ -275,7 +317,35 @@ func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.At
 	default:
 		action = plans.Update
 	}
+	return action, showJustNew
+}
 
+func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.Attribute, old, new cty.Value, nameLen, indent int, path cty.Path) bool {
+	path = append(path, cty.GetAttrStep{Name: name})
+	action, showJustNew := getPlanActionAndShow(old, new)
+
+	if action == plans.NoOp && !p.verbose && !identifyingAttribute(name, attrS) {
+		return true
+	}
+
+	// TODO: There will need to be an object-specific diff printer that handles
+	// things like individual attribute sensitivity and pathing into
+	// requiredReplace, but for now we will let writeAttrDiff handle attributes
+	// with NestedTypes like regular (object) attributes.
+	//
+	// To avoid printing any sensitive nested fields inside attributes (until
+	// the above is implemented) we will treat the entire attribute as
+	// sensitive.
+	var sensitive bool
+	if attrS.NestedType != nil && attrS.NestedType.ContainsSensitive() {
+		sensitive = true
+	}
+
+	p.buf.WriteString("\n")
+
+	p.writeSensitivityWarning(old, new, indent, action, false)
+
+	p.buf.WriteString(strings.Repeat(" ", indent))
 	p.writeActionSymbol(action)
 
 	p.buf.WriteString(p.color.Color("[bold]"))
@@ -284,7 +354,7 @@ func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.At
 	p.buf.WriteString(strings.Repeat(" ", nameLen-len(name)))
 	p.buf.WriteString(" = ")
 
-	if attrS.Sensitive {
+	if attrS.Sensitive || sensitive {
 		p.buf.WriteString("(sensitive value)")
 	} else {
 		switch {
@@ -300,13 +370,39 @@ func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.At
 			p.writeValueDiff(old, new, indent+2, path)
 		}
 	}
+
+	return false
 }
 
-func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *configschema.NestedBlock, old, new cty.Value, blankBefore bool, indent int, path cty.Path) {
+// TODO: writeNestedAttrDiff will be responsible for properly formatting
+// Attributes with NestedTypes in the diff. This function will be called from
+// writeAttrDiff when it recieves attribute with a NestedType. Right now, we are
+// letting the existing formatter "just" print these attributes like regular,
+// object-type attributes. Unlike the regular attribute printer, this function
+// will need to descend into the NestedType to ensure that we are properly
+// handling items such as:
+//   - nested sensitive fields
+//   - which nested field specifically requires replacement
+//
+// Examples of both can be seen in diff_test.go with FIXME comments.
+func (p *blockBodyDiffPrinter) writeNestedAttrDiff(name string, attrS *configschema.Attribute, old, new cty.Value, nameLen, indent int, path cty.Path) bool {
+	panic("not implemented")
+}
+
+func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *configschema.NestedBlock, old, new cty.Value, blankBefore bool, indent int, path cty.Path) int {
+	skippedBlocks := 0
 	path = append(path, cty.GetAttrStep{Name: name})
 	if old.IsNull() && new.IsNull() {
 		// Nothing to do if both old and new is null
-		return
+		return skippedBlocks
+	}
+
+	// If either the old or the new value is marked,
+	// Display a special diff because it is irrelevant
+	// to list all obfuscated attributes as (sensitive)
+	if old.IsMarked() || new.IsMarked() {
+		p.writeSensitiveNestedBlockDiff(name, old, new, indent, blankBefore, path)
+		return 0
 	}
 
 	// Where old/new are collections representing a nesting mode other than
@@ -335,7 +431,10 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 		if blankBefore {
 			p.buf.WriteRune('\n')
 		}
-		p.writeNestedBlockDiff(name, nil, &blockS.Block, action, old, new, indent, path)
+		skipped := p.writeNestedBlockDiff(name, nil, &blockS.Block, action, old, new, indent, path)
+		if skipped {
+			return 1
+		}
 	case configschema.NestingList:
 		// For the sake of handling nested blocks, we'll treat a null list
 		// the same as an empty list since the config language doesn't
@@ -377,19 +476,28 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 			if oldItem.RawEquals(newItem) {
 				action = plans.NoOp
 			}
-			p.writeNestedBlockDiff(name, nil, &blockS.Block, action, oldItem, newItem, indent, path)
+			skipped := p.writeNestedBlockDiff(name, nil, &blockS.Block, action, oldItem, newItem, indent, path)
+			if skipped {
+				skippedBlocks++
+			}
 		}
 		for i := commonLen; i < len(oldItems); i++ {
 			path := append(path, cty.IndexStep{Key: cty.NumberIntVal(int64(i))})
 			oldItem := oldItems[i]
 			newItem := cty.NullVal(oldItem.Type())
-			p.writeNestedBlockDiff(name, nil, &blockS.Block, plans.Delete, oldItem, newItem, indent, path)
+			skipped := p.writeNestedBlockDiff(name, nil, &blockS.Block, plans.Delete, oldItem, newItem, indent, path)
+			if skipped {
+				skippedBlocks++
+			}
 		}
 		for i := commonLen; i < len(newItems); i++ {
 			path := append(path, cty.IndexStep{Key: cty.NumberIntVal(int64(i))})
 			newItem := newItems[i]
 			oldItem := cty.NullVal(newItem.Type())
-			p.writeNestedBlockDiff(name, nil, &blockS.Block, plans.Create, oldItem, newItem, indent, path)
+			skipped := p.writeNestedBlockDiff(name, nil, &blockS.Block, plans.Create, oldItem, newItem, indent, path)
+			if skipped {
+				skippedBlocks++
+			}
 		}
 	case configschema.NestingSet:
 		// For the sake of handling nested blocks, we'll treat a null set
@@ -403,7 +511,7 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 
 		if (len(oldItems) + len(newItems)) == 0 {
 			// Nothing to do if both sets are empty
-			return
+			return 0
 		}
 
 		allItems := make([]cty.Value, 0, len(oldItems)+len(newItems))
@@ -437,7 +545,10 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 				newValue = val
 			}
 			path := append(path, cty.IndexStep{Key: val})
-			p.writeNestedBlockDiff(name, nil, &blockS.Block, action, oldValue, newValue, indent, path)
+			skipped := p.writeNestedBlockDiff(name, nil, &blockS.Block, action, oldValue, newValue, indent, path)
+			if skipped {
+				skippedBlocks++
+			}
 		}
 
 	case configschema.NestingMap:
@@ -451,7 +562,7 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 		newItems := new.AsValueMap()
 		if (len(oldItems) + len(newItems)) == 0 {
 			// Nothing to do if both maps are empty
-			return
+			return 0
 		}
 
 		allKeys := make(map[string]bool)
@@ -489,12 +600,59 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 			}
 
 			path := append(path, cty.IndexStep{Key: cty.StringVal(k)})
-			p.writeNestedBlockDiff(name, &k, &blockS.Block, action, oldValue, newValue, indent, path)
+			skipped := p.writeNestedBlockDiff(name, &k, &blockS.Block, action, oldValue, newValue, indent, path)
+			if skipped {
+				skippedBlocks++
+			}
 		}
 	}
+	return skippedBlocks
 }
 
-func (p *blockBodyDiffPrinter) writeNestedBlockDiff(name string, label *string, blockS *configschema.Block, action plans.Action, old, new cty.Value, indent int, path cty.Path) {
+func (p *blockBodyDiffPrinter) writeSensitiveNestedBlockDiff(name string, old, new cty.Value, indent int, blankBefore bool, path cty.Path) {
+	var action plans.Action
+	switch {
+	case old.IsNull():
+		action = plans.Create
+	case new.IsNull():
+		action = plans.Delete
+	case !new.IsWhollyKnown() || !old.IsWhollyKnown():
+		// "old" should actually always be known due to our contract
+		// that old values must never be unknown, but we'll allow it
+		// anyway to be robust.
+		action = plans.Update
+	case !ctyEqualValueAndMarks(old, new):
+		action = plans.Update
+	}
+
+	if blankBefore {
+		p.buf.WriteRune('\n')
+	}
+
+	// New line before warning printing
+	p.buf.WriteRune('\n')
+	p.writeSensitivityWarning(old, new, indent, action, true)
+	p.buf.WriteString(strings.Repeat(" ", indent))
+	p.writeActionSymbol(action)
+	fmt.Fprintf(p.buf, "%s {", name)
+	if action != plans.NoOp && p.pathForcesNewResource(path) {
+		p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
+	}
+	p.buf.WriteRune('\n')
+	p.buf.WriteString(strings.Repeat(" ", indent+4))
+	p.buf.WriteString("# At least one attribute in this block is (or was) sensitive,\n")
+	p.buf.WriteString(strings.Repeat(" ", indent+4))
+	p.buf.WriteString("# so its contents will not be displayed.")
+	p.buf.WriteRune('\n')
+	p.buf.WriteString(strings.Repeat(" ", indent+2))
+	p.buf.WriteString("}")
+}
+
+func (p *blockBodyDiffPrinter) writeNestedBlockDiff(name string, label *string, blockS *configschema.Block, action plans.Action, old, new cty.Value, indent int, path cty.Path) bool {
+	if action == plans.NoOp && !p.verbose {
+		return true
+	}
+
 	p.buf.WriteString("\n")
 	p.buf.WriteString(strings.Repeat(" ", indent))
 	p.writeActionSymbol(action)
@@ -509,15 +667,23 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiff(name string, label *string, 
 		p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
 	}
 
-	bodyWritten := p.writeBlockBodyDiff(blockS, old, new, indent+4, path)
-	if bodyWritten {
+	result := p.writeBlockBodyDiff(blockS, old, new, indent+4, path)
+	if result.bodyWritten {
 		p.buf.WriteString("\n")
 		p.buf.WriteString(strings.Repeat(" ", indent+2))
 	}
 	p.buf.WriteString("}")
+
+	return false
 }
 
 func (p *blockBodyDiffPrinter) writeValue(val cty.Value, action plans.Action, indent int) {
+	// Could check specifically for the sensitivity marker
+	if val.IsMarked() {
+		p.buf.WriteString("(sensitive)")
+		return
+	}
+
 	if !val.IsKnown() {
 		p.buf.WriteString("(known after apply)")
 		return
@@ -678,6 +844,14 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 	// However, these specialized implementations can apply only if both
 	// values are known and non-null.
 	if old.IsKnown() && new.IsKnown() && !old.IsNull() && !new.IsNull() && typesEqual {
+		if old.IsMarked() || new.IsMarked() {
+			p.buf.WriteString("(sensitive)")
+			if p.pathForcesNewResource(path) {
+				p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
+			}
+			return
+		}
+
 		switch {
 		case ty == cty.String:
 			// We have special behavior for both multi-line strings in general
@@ -709,7 +883,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 							p.buf.WriteString(strings.Repeat(" ", indent))
 							p.buf.WriteByte(')')
 						} else {
-							// if they differ only in insigificant whitespace
+							// if they differ only in insignificant whitespace
 							// then we'll note that but still expand out the
 							// effective value.
 							if p.pathForcesNewResource(path) {
@@ -729,11 +903,11 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 			}
 
-			if strings.Index(oldS, "\n") < 0 && strings.Index(newS, "\n") < 0 {
+			if !strings.Contains(oldS, "\n") && !strings.Contains(newS, "\n") {
 				break
 			}
 
-			p.buf.WriteString("<<~EOT")
+			p.buf.WriteString("<<-EOT")
 			if p.pathForcesNewResource(path) {
 				p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
 			}
@@ -755,23 +929,35 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 			}
 
-			diffLines := ctySequenceDiff(oldLines, newLines)
-			for _, diffLine := range diffLines {
-				p.buf.WriteString(strings.Repeat(" ", indent+2))
-				p.writeActionSymbol(diffLine.Action)
-
-				switch diffLine.Action {
-				case plans.NoOp, plans.Delete:
-					p.buf.WriteString(diffLine.Before.AsString())
-				case plans.Create:
-					p.buf.WriteString(diffLine.After.AsString())
-				default:
-					// Should never happen since the above covers all
-					// actions that ctySequenceDiff can return for strings
-					p.buf.WriteString(diffLine.After.AsString())
-
+			// Optimization for strings which are exactly equal: just print
+			// directly without calculating the sequence diff. This makes a
+			// significant difference when this code path is reached via a
+			// writeValue call with a large multi-line string.
+			if oldS == newS {
+				for _, line := range newLines {
+					p.buf.WriteString(strings.Repeat(" ", indent+4))
+					p.buf.WriteString(line.AsString())
+					p.buf.WriteString("\n")
 				}
-				p.buf.WriteString("\n")
+			} else {
+				diffLines := ctySequenceDiff(oldLines, newLines)
+				for _, diffLine := range diffLines {
+					p.buf.WriteString(strings.Repeat(" ", indent+2))
+					p.writeActionSymbol(diffLine.Action)
+
+					switch diffLine.Action {
+					case plans.NoOp, plans.Delete:
+						p.buf.WriteString(diffLine.Before.AsString())
+					case plans.Create:
+						p.buf.WriteString(diffLine.After.AsString())
+					default:
+						// Should never happen since the above covers all
+						// actions that ctySequenceDiff can return for strings
+						p.buf.WriteString(diffLine.After.AsString())
+
+					}
+					p.buf.WriteString("\n")
+				}
 			}
 
 			p.buf.WriteString(strings.Repeat(" ", indent)) // +4 here because there's no symbol
@@ -819,10 +1005,9 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				removed = cty.SetValEmpty(ty.ElementType())
 			}
 
+			suppressedElements := 0
 			for it := all.ElementIterator(); it.Next(); {
 				_, val := it.Element()
-
-				p.buf.WriteString(strings.Repeat(" ", indent+2))
 
 				var action plans.Action
 				switch {
@@ -836,9 +1021,26 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					action = plans.NoOp
 				}
 
+				if action == plans.NoOp && !p.verbose {
+					suppressedElements++
+					continue
+				}
+
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				p.writeActionSymbol(action)
 				p.writeValue(val, action, indent+4)
 				p.buf.WriteString(",\n")
+			}
+
+			if suppressedElements > 0 {
+				p.writeActionSymbol(plans.NoOp)
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
+				noun := "elements"
+				if suppressedElements == 1 {
+					noun = "element"
+				}
+				p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", suppressedElements, noun)))
+				p.buf.WriteString("\n")
 			}
 
 			p.buf.WriteString(strings.Repeat(" ", indent))
@@ -852,7 +1054,72 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 			p.buf.WriteString("\n")
 
 			elemDiffs := ctySequenceDiff(old.AsValueSlice(), new.AsValueSlice())
-			for _, elemDiff := range elemDiffs {
+
+			// Maintain a stack of suppressed lines in the diff for later
+			// display or elision
+			var suppressedElements []*plans.Change
+			var changeShown bool
+
+			for i := 0; i < len(elemDiffs); i++ {
+				if !p.verbose {
+					for i < len(elemDiffs) && elemDiffs[i].Action == plans.NoOp {
+						suppressedElements = append(suppressedElements, elemDiffs[i])
+						i++
+					}
+				}
+
+				// If we have some suppressed elements on the stack…
+				if len(suppressedElements) > 0 {
+					// If we've just rendered a change, display the first
+					// element in the stack as context
+					if changeShown {
+						elemDiff := suppressedElements[0]
+						p.buf.WriteString(strings.Repeat(" ", indent+4))
+						p.writeValue(elemDiff.After, elemDiff.Action, indent+4)
+						p.buf.WriteString(",\n")
+						suppressedElements = suppressedElements[1:]
+					}
+
+					hidden := len(suppressedElements)
+
+					// If we're not yet at the end of the list, capture the
+					// last element on the stack as context for the upcoming
+					// change to be rendered
+					var nextContextDiff *plans.Change
+					if hidden > 0 && i < len(elemDiffs) {
+						hidden--
+						nextContextDiff = suppressedElements[hidden]
+					}
+
+					// If there are still hidden elements, show an elision
+					// statement counting them
+					if hidden > 0 {
+						p.writeActionSymbol(plans.NoOp)
+						p.buf.WriteString(strings.Repeat(" ", indent+2))
+						noun := "elements"
+						if hidden == 1 {
+							noun = "element"
+						}
+						p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", hidden, noun)))
+						p.buf.WriteString("\n")
+					}
+
+					// Display the next context diff if it was captured above
+					if nextContextDiff != nil {
+						p.buf.WriteString(strings.Repeat(" ", indent+4))
+						p.writeValue(nextContextDiff.After, nextContextDiff.Action, indent+4)
+						p.buf.WriteString(",\n")
+					}
+
+					// Suppressed elements have now been handled so clear them again
+					suppressedElements = nil
+				}
+
+				if i >= len(elemDiffs) {
+					break
+				}
+
+				elemDiff := elemDiffs[i]
 				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				p.writeActionSymbol(elemDiff.Action)
 				switch elemDiff.Action {
@@ -869,10 +1136,12 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 
 				p.buf.WriteString(",\n")
+				changeShown = true
 			}
 
 			p.buf.WriteString(strings.Repeat(" ", indent))
 			p.buf.WriteString("]")
+
 			return
 
 		case ty.IsMapType():
@@ -903,6 +1172,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 
 			sort.Strings(allKeys)
 
+			suppressedElements := 0
 			lastK := ""
 			for i, k := range allKeys {
 				if i > 0 && lastK == k {
@@ -910,21 +1180,34 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 				lastK = k
 
-				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				kV := cty.StringVal(k)
 				var action plans.Action
 				if old.HasIndex(kV).False() {
 					action = plans.Create
 				} else if new.HasIndex(kV).False() {
 					action = plans.Delete
-				} else if eqV := old.Index(kV).Equals(new.Index(kV)); eqV.IsKnown() && eqV.True() {
-					action = plans.NoOp
-				} else {
-					action = plans.Update
+				}
+
+				if old.HasIndex(kV).True() && new.HasIndex(kV).True() {
+					if ctyEqualValueAndMarks(old.Index(kV), new.Index(kV)) {
+						action = plans.NoOp
+					} else {
+						action = plans.Update
+					}
+				}
+
+				if action == plans.NoOp && !p.verbose {
+					suppressedElements++
+					continue
 				}
 
 				path := append(path, cty.IndexStep{Key: kV})
 
+				oldV := old.Index(kV)
+				newV := new.Index(kV)
+				p.writeSensitivityWarning(oldV, newV, indent+2, action, false)
+
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				p.writeActionSymbol(action)
 				p.writeValue(kV, action, indent+4)
 				p.buf.WriteString(strings.Repeat(" ", keyLen-len(k)))
@@ -932,22 +1215,40 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				switch action {
 				case plans.Create, plans.NoOp:
 					v := new.Index(kV)
-					p.writeValue(v, action, indent+4)
+					if v.IsMarked() {
+						p.buf.WriteString("(sensitive)")
+					} else {
+						p.writeValue(v, action, indent+4)
+					}
 				case plans.Delete:
 					oldV := old.Index(kV)
 					newV := cty.NullVal(oldV.Type())
 					p.writeValueDiff(oldV, newV, indent+4, path)
 				default:
-					oldV := old.Index(kV)
-					newV := new.Index(kV)
-					p.writeValueDiff(oldV, newV, indent+4, path)
+					if oldV.IsMarked() || newV.IsMarked() {
+						p.buf.WriteString("(sensitive)")
+					} else {
+						p.writeValueDiff(oldV, newV, indent+4, path)
+					}
 				}
 
 				p.buf.WriteByte('\n')
 			}
 
+			if suppressedElements > 0 {
+				p.writeActionSymbol(plans.NoOp)
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
+				noun := "elements"
+				if suppressedElements == 1 {
+					noun = "element"
+				}
+				p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", suppressedElements, noun)))
+				p.buf.WriteString("\n")
+			}
+
 			p.buf.WriteString(strings.Repeat(" ", indent))
 			p.buf.WriteString("}")
+
 			return
 		case ty.IsObjectType():
 			p.buf.WriteString("{")
@@ -976,6 +1277,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 
 			sort.Strings(allKeys)
 
+			suppressedElements := 0
 			lastK := ""
 			for i, k := range allKeys {
 				if i > 0 && lastK == k {
@@ -983,21 +1285,26 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 				lastK = k
 
-				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				kV := k
 				var action plans.Action
 				if !old.Type().HasAttribute(kV) {
 					action = plans.Create
 				} else if !new.Type().HasAttribute(kV) {
 					action = plans.Delete
-				} else if eqV := old.GetAttr(kV).Equals(new.GetAttr(kV)); eqV.IsKnown() && eqV.True() {
+				} else if ctyEqualValueAndMarks(old.GetAttr(kV), new.GetAttr(kV)) {
 					action = plans.NoOp
 				} else {
 					action = plans.Update
 				}
 
+				if action == plans.NoOp && !p.verbose {
+					suppressedElements++
+					continue
+				}
+
 				path := append(path, cty.GetAttrStep{Name: kV})
 
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				p.writeActionSymbol(action)
 				p.buf.WriteString(k)
 				p.buf.WriteString(strings.Repeat(" ", keyLen-len(k)))
@@ -1017,6 +1324,17 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					p.writeValueDiff(oldV, newV, indent+4, path)
 				}
 
+				p.buf.WriteString("\n")
+			}
+
+			if suppressedElements > 0 {
+				p.writeActionSymbol(plans.NoOp)
+				p.buf.WriteString(strings.Repeat(" ", indent+2))
+				noun := "elements"
+				if suppressedElements == 1 {
+					noun = "element"
+				}
+				p.buf.WriteString(p.color.Color(fmt.Sprintf("[dark_gray]# (%d unchanged %s hidden)[reset]", suppressedElements, noun)))
 				p.buf.WriteString("\n")
 			}
 
@@ -1065,6 +1383,34 @@ func (p *blockBodyDiffPrinter) writeActionSymbol(action plans.Action) {
 	}
 }
 
+func (p *blockBodyDiffPrinter) writeSensitivityWarning(old, new cty.Value, indent int, action plans.Action, isBlock bool) {
+	// Dont' show this warning for create or delete
+	if action == plans.Create || action == plans.Delete {
+		return
+	}
+
+	// Customize the warning based on if it is an attribute or block
+	diffType := "attribute value"
+	if isBlock {
+		diffType = "block"
+	}
+
+	if new.IsMarked() && !old.IsMarked() {
+		p.buf.WriteString(strings.Repeat(" ", indent))
+		p.buf.WriteString(p.color.Color(fmt.Sprintf("# [yellow]Warning:[reset] this %s will be marked as sensitive and will\n", diffType)))
+		p.buf.WriteString(strings.Repeat(" ", indent))
+		p.buf.WriteString(p.color.Color("# not display in UI output after applying this change\n"))
+	}
+
+	// Note if changing this attribute will change its sensitivity
+	if old.IsMarked() && !new.IsMarked() {
+		p.buf.WriteString(strings.Repeat(" ", indent))
+		p.buf.WriteString(p.color.Color(fmt.Sprintf("# [yellow]Warning:[reset] this %s will no longer be marked as sensitive\n", diffType)))
+		p.buf.WriteString(strings.Repeat(" ", indent))
+		p.buf.WriteString(p.color.Color("# after applying this change\n"))
+	}
+}
+
 func (p *blockBodyDiffPrinter) pathForcesNewResource(path cty.Path) bool {
 	if !p.action.IsReplace() || p.requiredReplace.Empty() {
 		// "requiredReplace" only applies when the instance is being replaced,
@@ -1096,7 +1442,8 @@ func ctyGetAttrMaybeNull(val cty.Value, name string) cty.Value {
 	// This allows us to avoid spurious diffs
 	// until we introduce null to the SDK.
 	attrValue := val.GetAttr(name)
-	if ctyEmptyString(attrValue) {
+	// If the value is marked, the ctyEmptyString function will fail
+	if !val.ContainsMarked() && ctyEmptyString(attrValue) {
 		return cty.NullVal(attrType)
 	}
 
@@ -1168,11 +1515,23 @@ func ctySequenceDiff(old, new []cty.Value) []*plans.Change {
 	return ret
 }
 
+// ctyEqualValueAndMarks checks equality of two possibly-marked values,
+// considering partially-unknown values and equal values with different marks
+// as inequal
 func ctyEqualWithUnknown(old, new cty.Value) bool {
 	if !old.IsWhollyKnown() || !new.IsWhollyKnown() {
 		return false
 	}
-	return old.Equals(new).True()
+	return ctyEqualValueAndMarks(old, new)
+}
+
+// ctyEqualValueAndMarks checks equality of two possibly-marked values,
+// considering equal values with different marks as inequal
+func ctyEqualValueAndMarks(old, new cty.Value) bool {
+	oldUnmarked, oldMarks := old.UnmarkDeep()
+	newUnmarked, newMarks := new.UnmarkDeep()
+	sameValue := oldUnmarked.Equals(newUnmarked)
+	return sameValue.IsKnown() && sameValue.True() && oldMarks.Equal(newMarks)
 }
 
 // ctyTypesEqual checks equality of two types more loosely
@@ -1265,4 +1624,12 @@ func DiffActionSymbol(action plans.Action) string {
 	default:
 		return "  ?"
 	}
+}
+
+// Extremely coarse heuristic for determining whether or not a given attribute
+// name is important for identifying a resource. In the future, this may be
+// replaced by a flag in the schema, but for now this is likely to be good
+// enough.
+func identifyingAttribute(name string, attrSchema *configschema.Attribute) bool {
+	return name == "id" || name == "tags" || name == "name"
 }

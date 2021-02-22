@@ -94,7 +94,7 @@ func TestBackendStates(t *testing.T, b Backend) {
 
 	// Test it starts with only the default
 	if !noDefault && (len(workspaces) != 1 || workspaces[0] != DefaultStateName) {
-		t.Fatalf("should only default to start: %#v", workspaces)
+		t.Fatalf("should only have the default workspace to start: %#v", workspaces)
 	}
 
 	// Create a couple states
@@ -150,7 +150,7 @@ func TestBackendStates(t *testing.T, b Backend) {
 				SchemaVersion: 0,
 			},
 			addrs.AbsProviderConfig{
-				Provider: addrs.NewLegacyProvider("test"),
+				Provider: addrs.NewDefaultProvider("test"),
 				Module:   addrs.RootModule,
 			},
 		)
@@ -279,7 +279,27 @@ func TestBackendStateForceUnlock(t *testing.T, b1, b2 Backend) {
 	testLocks(t, b1, b2, true)
 }
 
+// TestBackendStateLocksInWS will test the locking functionality of the remote
+// state backend.
+func TestBackendStateLocksInWS(t *testing.T, b1, b2 Backend, ws string) {
+	t.Helper()
+	testLocksInWorkspace(t, b1, b2, false, ws)
+}
+
+// TestBackendStateForceUnlockInWS verifies that the lock error is the expected
+// type, and the lock can be unlocked using the ID reported in the error.
+// Remote state backends that support -force-unlock should call this in at
+// least one of the acceptance tests.
+func TestBackendStateForceUnlockInWS(t *testing.T, b1, b2 Backend, ws string) {
+	t.Helper()
+	testLocksInWorkspace(t, b1, b2, true, ws)
+}
+
 func testLocks(t *testing.T, b1, b2 Backend, testForceUnlock bool) {
+	testLocksInWorkspace(t, b1, b2, testForceUnlock, DefaultStateName)
+}
+
+func testLocksInWorkspace(t *testing.T, b1, b2 Backend, testForceUnlock bool, workspace string) {
 	t.Helper()
 
 	// Get the default state for each

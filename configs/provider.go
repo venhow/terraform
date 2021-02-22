@@ -30,13 +30,6 @@ type Provider struct {
 func decodeProviderBlock(block *hcl.Block) (*Provider, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
 
-	// Produce deprecation messages for any pre-0.12-style
-	// single-interpolation-only expressions. We do this up front here because
-	// then we can also catch instances inside special blocks like "connection",
-	// before PartialContent extracts them.
-	moreDiags := warnForDeprecatedInterpolationsInBody(block.Body)
-	diags = append(diags, moreDiags...)
-
 	content, config, moreDiags := block.Body.PartialContent(providerBlockSchema)
 	diags = append(diags, moreDiags...)
 
@@ -69,6 +62,12 @@ func decodeProviderBlock(block *hcl.Block) (*Provider, hcl.Diagnostics) {
 	}
 
 	if attr, exists := content.Attributes["version"]; exists {
+		diags = append(diags, &hcl.Diagnostic{
+			Severity: hcl.DiagWarning,
+			Summary:  "Version constraints inside provider configuration blocks are deprecated",
+			Detail:   "Terraform 0.13 and earlier allowed provider version constraints inside the provider configuration block, but that is now deprecated and will be removed in a future version of Terraform. To silence this warning, move the provider version constraint into the required_providers block.",
+			Subject:  attr.Expr.Range().Ptr(),
+		})
 		var versionDiags hcl.Diagnostics
 		provider.Version, versionDiags = decodeVersionConstraint(attr)
 		diags = append(diags, versionDiags...)

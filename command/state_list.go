@@ -40,8 +40,15 @@ func (c *StateListCommand) Run(args []string) int {
 		return 1
 	}
 
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
+
 	// Get the state
-	env := c.Workspace()
+	env, err := c.Workspace()
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+		return 1
+	}
 	stateMgr, err := b.StateMgr(env)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf(errStateLoadingState, err))
@@ -54,7 +61,7 @@ func (c *StateListCommand) Run(args []string) int {
 
 	state := stateMgr.State()
 	if state == nil {
-		c.Ui.Error(fmt.Sprintf(errStateNotFound))
+		c.Ui.Error(errStateNotFound)
 		return 1
 	}
 
@@ -121,10 +128,6 @@ Options:
 func (c *StateListCommand) Synopsis() string {
 	return "List resources in the state"
 }
-
-const errStateFilter = `Error filtering state: %[1]s
-
-Please ensure that all your addresses are formatted properly.`
 
 const errStateLoadingState = `Error loading the state: %[1]s
 

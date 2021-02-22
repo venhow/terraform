@@ -43,19 +43,29 @@ func (cp *CachedProvider) PackageLocation() getproviders.PackageLocalDir {
 // If you need a specific version of hash rather than just whichever one is
 // current default, call that version's corresponding method (e.g. HashV1)
 // directly instead.
-func (cp *CachedProvider) Hash() (string, error) {
+func (cp *CachedProvider) Hash() (getproviders.Hash, error) {
 	return getproviders.PackageHash(cp.PackageLocation())
 }
 
 // MatchesHash returns true if the package on disk matches the given hash,
 // or false otherwise. If it cannot traverse the package directory and read
 // all of the files in it, or if the hash is in an unsupported format,
-// CheckHash returns an error.
+// MatchesHash returns an error.
 //
 // MatchesHash may accept hashes in a number of different formats. Over time
 // the set of supported formats may grow and shrink.
-func (cp *CachedProvider) MatchesHash(want string) (bool, error) {
+func (cp *CachedProvider) MatchesHash(want getproviders.Hash) (bool, error) {
 	return getproviders.PackageMatchesHash(cp.PackageLocation(), want)
+}
+
+// MatchesAnyHash returns true if the package on disk matches the given hash,
+// or false otherwise. If it cannot traverse the package directory and read
+// all of the files in it, MatchesAnyHash returns an error.
+//
+// Unlike the singular MatchesHash, MatchesAnyHash considers unsupported hash
+// formats as successfully non-matching, rather than returning an error.
+func (cp *CachedProvider) MatchesAnyHash(allowed []getproviders.Hash) (bool, error) {
+	return getproviders.PackageMatchesAnyHash(cp.PackageLocation(), allowed)
 }
 
 // HashV1 computes a hash of the contents of the package directory associated
@@ -69,7 +79,7 @@ func (cp *CachedProvider) MatchesHash(want string) (bool, error) {
 // being added (in a backward-compatible way) in future. The result from
 // HashV1 always begins with the prefix "h1:" so that callers can distinguish
 // the results of potentially multiple different hash algorithms in future.
-func (cp *CachedProvider) HashV1() (string, error) {
+func (cp *CachedProvider) HashV1() (getproviders.Hash, error) {
 	return getproviders.PackageHashV1(cp.PackageLocation())
 }
 

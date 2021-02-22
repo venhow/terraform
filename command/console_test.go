@@ -9,8 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/copy"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/providers"
 	"github.com/mitchellh/cli"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -27,11 +26,13 @@ func TestConsole_basic(t *testing.T) {
 	defer testFixCwd(t, tmp, cwd)
 
 	p := testProvider()
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -53,31 +54,36 @@ func TestConsole_basic(t *testing.T) {
 }
 
 func TestConsole_tfvars(t *testing.T) {
-	tmp, cwd := testCwd(t)
-	defer testFixCwd(t, tmp, cwd)
+	td := tempDir(t)
+	testCopyDir(t, testFixturePath("apply-vars"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
 
 	// Write a terraform.tvars
-	varFilePath := filepath.Join(tmp, "terraform.tfvars")
+	varFilePath := filepath.Join(td, "terraform.tfvars")
 	if err := ioutil.WriteFile(varFilePath, []byte(applyVarFile), 0644); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
 	p := testProvider()
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"value": {Type: cty.String, Optional: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"value": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
 	}
-
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -85,9 +91,7 @@ func TestConsole_tfvars(t *testing.T) {
 	defer testStdinPipe(t, strings.NewReader("var.foo\n"))()
 	outCloser := testStdoutCapture(t, &output)
 
-	args := []string{
-		testFixturePath("apply-vars"),
-	}
+	args := []string{}
 	code := c.Run(args)
 	outCloser()
 	if code != 0 {
@@ -95,7 +99,7 @@ func TestConsole_tfvars(t *testing.T) {
 	}
 
 	actual := output.String()
-	if actual != "bar\n" {
+	if actual != "\"bar\"\n" {
 		t.Fatalf("bad: %q", actual)
 	}
 }
@@ -106,25 +110,33 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	// "terraform console" producing an interactive prompt for those variables
 	// or producing errors. Instead, it should allow evaluation in that
 	// partial context but see the unset variables values as being unknown.
-
-	tmp, cwd := testCwd(t)
-	defer testFixCwd(t, tmp, cwd)
+	//
+	// This test fixture includes variable "foo" {}, which we are
+	// intentionally not setting here.
+	td := tempDir(t)
+	testCopyDir(t, testFixturePath("apply-vars"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
 
 	p := testProvider()
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"value": {Type: cty.String, Optional: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"value": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
 	}
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -132,57 +144,87 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	defer testStdinPipe(t, strings.NewReader("var.foo\n"))()
 	outCloser := testStdoutCapture(t, &output)
 
-	args := []string{
-		// This test fixture includes variable "foo" {}, which we are
-		// intentionally not setting here.
-		testFixturePath("apply-vars"),
-	}
+	args := []string{}
 	code := c.Run(args)
 	outCloser()
 
-	// Because we're running "terraform console" in piped input mode, we're
-	// expecting it to return a nonzero exit status here but the message
-	// must be the one indicating that it did attempt to evaluate var.foo and
-	// got an unknown value in return, rather than an error about var.foo
-	// not being set or a failure to prompt for it.
-	if code == 0 {
-		t.Fatalf("unexpected success\n%s", ui.OutputWriter.String())
+	if code != 0 {
+		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
 	}
 
-	// The error message should be the one console produces when it encounters
-	// an unknown value.
-	got := ui.ErrorWriter.String()
-	want := `Error: Result depends on values that cannot be determined`
-	if !strings.Contains(got, want) {
-		t.Fatalf("wrong output\ngot:\n%s\n\nwant string containing %q", got, want)
+	if got, want := output.String(), "(known after apply)\n"; got != want {
+		t.Fatalf("unexpected output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestConsole_variables(t *testing.T) {
+	td := tempDir(t)
+	testCopyDir(t, testFixturePath("variables"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	p := testProvider()
+	ui := cli.NewMockUi()
+	view, _ := testView(t)
+	c := &ConsoleCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+			View:             view,
+		},
+	}
+
+	commands := map[string]string{
+		"var.foo\n":          "\"bar\"\n",
+		"var.snack\n":        "\"popcorn\"\n",
+		"var.secret_snack\n": "(sensitive)\n",
+		"local.snack_bar\n":  "[\n  \"popcorn\",\n  (sensitive),\n]\n",
+	}
+
+	args := []string{}
+
+	for cmd, val := range commands {
+		var output bytes.Buffer
+		defer testStdinPipe(t, strings.NewReader(cmd))()
+		outCloser := testStdoutCapture(t, &output)
+		code := c.Run(args)
+		outCloser()
+		if code != 0 {
+			t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+		}
+
+		actual := output.String()
+		if output.String() != val {
+			t.Fatalf("bad: %q, expected %q", actual, val)
+		}
 	}
 }
 
 func TestConsole_modules(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("modules"), td)
+	testCopyDir(t, testFixturePath("modules"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
 	p := applyFixtureProvider()
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
+	view, _ := testView(t)
 
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	commands := map[string]string{
-		"module.child.myoutput\n":          "bar\n",
-		"module.count_child[0].myoutput\n": "bar\n",
+		"module.child.myoutput\n":          "\"bar\"\n",
+		"module.count_child[0].myoutput\n": "\"bar\"\n",
 		"local.foo\n":                      "3\n",
 	}
 
-	args := []string{
-		testFixturePath("modules"),
-	}
+	args := []string{}
 
 	for cmd, val := range commands {
 		var output bytes.Buffer

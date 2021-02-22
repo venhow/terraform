@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
@@ -21,13 +22,13 @@ func (t *ImportStateTransformer) Transform(g *Graph) error {
 
 		// This is only likely to happen in misconfigured tests
 		if t.Config == nil {
-			return fmt.Errorf("Cannot import into an empty configuration.")
+			return fmt.Errorf("cannot import into an empty configuration")
 		}
 
 		// Get the module config
 		modCfg := t.Config.Descendent(target.Addr.Module.Module())
 		if modCfg == nil {
-			return fmt.Errorf("Module %s not found.", target.Addr.Module.Module())
+			return fmt.Errorf("module %s not found", target.Addr.Module.Module())
 		}
 
 		providerAddr := addrs.AbsProviderConfig{
@@ -70,7 +71,7 @@ type graphNodeImportState struct {
 
 var (
 	_ GraphNodeModulePath        = (*graphNodeImportState)(nil)
-	_ GraphNodeEvalable          = (*graphNodeImportState)(nil)
+	_ GraphNodeExecutable        = (*graphNodeImportState)(nil)
 	_ GraphNodeProviderConsumer  = (*graphNodeImportState)(nil)
 	_ GraphNodeDynamicExpandable = (*graphNodeImportState)(nil)
 )
@@ -114,28 +115,48 @@ func (n *graphNodeImportState) ModulePath() addrs.Module {
 	return n.Addr.Module.Module()
 }
 
-// GraphNodeEvalable impl.
-func (n *graphNodeImportState) EvalTree() EvalNode {
-	var provider providers.Interface
-
+// GraphNodeExecutable impl.
+func (n *graphNodeImportState) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
 	// Reset our states
 	n.states = nil
 
-	// Return our sequence
-	return &EvalSequence{
-		Nodes: []EvalNode{
-			&EvalGetProvider{
-				Addr:   n.ResolvedProvider,
-				Output: &provider,
-			},
-			&EvalImportState{
-				Addr:     n.Addr.Resource,
-				Provider: &provider,
-				ID:       n.ID,
-				Output:   &n.states,
-			},
-		},
+	provider, _, err := getProvider(ctx, n.ResolvedProvider)
+	diags = diags.Append(err)
+	if diags.HasErrors() {
+		return diags
 	}
+
+	// import state
+	absAddr := n.Addr.Resource.Absolute(ctx.Path())
+
+	// Call pre-import hook
+	diags = diags.Append(ctx.Hook(func(h Hook) (HookAction, error) {
+		return h.PreImportState(absAddr, n.ID)
+	}))
+	if diags.HasErrors() {
+		return diags
+	}
+
+	resp := provider.ImportResourceState(providers.ImportResourceStateRequest{
+		TypeName: n.Addr.Resource.Resource.Type,
+		ID:       n.ID,
+	})
+	diags = diags.Append(resp.Diagnostics)
+	if diags.HasErrors() {
+		return diags
+	}
+
+	imported := resp.ImportedResources
+	for _, obj := range imported {
+		log.Printf("[TRACE] graphNodeImportState: import %s %q produced instance object of type %s", absAddr.String(), n.ID, obj.TypeName)
+	}
+	n.states = imported
+
+	// Call post-import hook
+	diags = diags.Append(ctx.Hook(func(h Hook) (HookAction, error) {
+		return h.PostImportState(absAddr, imported)
+	}))
+	return diags
 }
 
 // GraphNodeDynamicExpandable impl.
@@ -194,9 +215,9 @@ func (n *graphNodeImportState) DynamicExpand(ctx EvalContext) (*Graph, error) {
 	}
 
 	// For each of the states, we add a node to handle the refresh/add to state.
-	// "n.states" is populated by our own EvalTree with the result of
-	// ImportState. Since DynamicExpand is always called after EvalTree, this
-	// is safe.
+	// "n.states" is populated by our own Execute with the result of
+	// ImportState. Since DynamicExpand is always called after Execute, this is
+	// safe.
 	for i, state := range n.states {
 		g.Add(&graphNodeImportStateSub{
 			TargetAddr:       addrs[i],
@@ -226,7 +247,7 @@ type graphNodeImportStateSub struct {
 
 var (
 	_ GraphNodeModuleInstance = (*graphNodeImportStateSub)(nil)
-	_ GraphNodeEvalable       = (*graphNodeImportStateSub)(nil)
+	_ GraphNodeExecutable     = (*graphNodeImportStateSub)(nil)
 )
 
 func (n *graphNodeImportStateSub) Name() string {
@@ -237,43 +258,29 @@ func (n *graphNodeImportStateSub) Path() addrs.ModuleInstance {
 	return n.TargetAddr.Module
 }
 
-// GraphNodeEvalable impl.
-func (n *graphNodeImportStateSub) EvalTree() EvalNode {
+// GraphNodeExecutable impl.
+func (n *graphNodeImportStateSub) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
 	// If the Ephemeral type isn't set, then it is an error
 	if n.State.TypeName == "" {
-		err := fmt.Errorf("import of %s didn't set type", n.TargetAddr.String())
-		return &EvalReturnError{Error: &err}
+		diags = diags.Append(fmt.Errorf("import of %s didn't set type", n.TargetAddr.String()))
+		return diags
 	}
 
 	state := n.State.AsInstanceObject()
 
-	var provider providers.Interface
-	var providerSchema *ProviderSchema
-	return &EvalSequence{
-		Nodes: []EvalNode{
-			&EvalGetProvider{
-				Addr:   n.ResolvedProvider,
-				Output: &provider,
-				Schema: &providerSchema,
-			},
-			&EvalRefresh{
-				Addr:           n.TargetAddr.Resource,
-				ProviderAddr:   n.ResolvedProvider,
-				Provider:       &provider,
-				ProviderSchema: &providerSchema,
-				State:          &state,
-				Output:         &state,
-			},
-			&EvalImportStateVerify{
-				Addr:  n.TargetAddr.Resource,
-				State: &state,
-			},
-			&EvalWriteState{
-				Addr:           n.TargetAddr.Resource,
-				ProviderAddr:   n.ResolvedProvider,
-				ProviderSchema: &providerSchema,
-				State:          &state,
-			},
+	// Refresh
+	riNode := &NodeAbstractResourceInstance{
+		Addr: n.TargetAddr,
+		NodeAbstractResource: NodeAbstractResource{
+			ResolvedProvider: n.ResolvedProvider,
 		},
 	}
+	state, refreshDiags := riNode.refresh(ctx, state)
+	diags = diags.Append(refreshDiags)
+	if diags.HasErrors() {
+		return diags
+	}
+
+	diags = diags.Append(riNode.writeResourceInstanceState(ctx, state, nil, workingState))
+	return diags
 }

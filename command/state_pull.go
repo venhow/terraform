@@ -22,7 +22,6 @@ func (c *StatePullCommand) Run(args []string) int {
 		c.Ui.Error(fmt.Sprintf("Error parsing command-line flags: %s\n", err.Error()))
 		return 1
 	}
-	args = cmdFlags.Args()
 
 	// Load the backend
 	b, backendDiags := c.Backend(nil)
@@ -31,8 +30,15 @@ func (c *StatePullCommand) Run(args []string) int {
 		return 1
 	}
 
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
+
 	// Get the state manager for the current workspace
-	env := c.Workspace()
+	env, err := c.Workspace()
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+		return 1
+	}
 	stateMgr, err := b.StateMgr(env)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf(errStateLoadingState, err))
@@ -64,9 +70,13 @@ func (c *StatePullCommand) Help() string {
 	helpText := `
 Usage: terraform state pull [options]
 
-  Pull the state from its location and output it to stdout.
+  Pull the state from its location, upgrade the local copy, and output it
+  to stdout.
 
   This command "pulls" the current state and outputs it to stdout.
+  As part of this process, Terraform will upgrade the state format of the
+  local copy to the current version.
+
   The primary use of this is for state stored remotely. This command
   will still work with local state but is less useful for this.
 

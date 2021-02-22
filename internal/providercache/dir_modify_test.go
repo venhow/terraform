@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/apparentlymart/go-versions/versions"
@@ -19,6 +20,10 @@ func TestInstallPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDirPath)
+	tmpDirPath, err = filepath.EvalSymlinks(tmpDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	linuxPlatform := getproviders.Platform{
 		OS:   "linux",
@@ -41,7 +46,7 @@ func TestInstallPackage(t *testing.T) {
 		Location: getproviders.PackageLocalArchive("testdata/terraform-provider-null_2.1.0_linux_amd64.zip"),
 	}
 
-	result, err := tmpDir.InstallPackage(context.TODO(), meta)
+	result, err := tmpDir.InstallPackage(context.TODO(), meta, nil)
 	if err != nil {
 		t.Fatalf("InstallPackage failed: %s", err)
 	}
@@ -74,6 +79,10 @@ func TestLinkFromOtherCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDirPath)
+	tmpDirPath, err = filepath.EvalSymlinks(tmpDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	windowsPlatform := getproviders.Platform{
 		OS:   "windows",
@@ -120,7 +129,7 @@ func TestLinkFromOtherCache(t *testing.T) {
 		t.Fatalf("null provider has no latest version in source directory")
 	}
 
-	err = tmpDir.LinkFromOtherCache(cacheEntry)
+	err = tmpDir.LinkFromOtherCache(cacheEntry, nil)
 	if err != nil {
 		t.Fatalf("LinkFromOtherCache failed: %s", err)
 	}

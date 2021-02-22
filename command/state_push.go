@@ -1,13 +1,14 @@
 package command
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/hashicorp/terraform/command/arguments"
 	"github.com/hashicorp/terraform/command/clistate"
+	"github.com/hashicorp/terraform/command/views"
 	"github.com/hashicorp/terraform/states/statefile"
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/mitchellh/cli"
@@ -22,7 +23,7 @@ type StatePushCommand struct {
 func (c *StatePushCommand) Run(args []string) int {
 	args = c.Meta.process(args)
 	var flagForce bool
-	cmdFlags := c.Meta.defaultFlagSet("state push")
+	cmdFlags := c.Meta.ignoreRemoteVersionFlagSet("state push")
 	cmdFlags.BoolVar(&flagForce, "force", false, "")
 	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
 	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
@@ -71,21 +72,38 @@ func (c *StatePushCommand) Run(args []string) int {
 		return 1
 	}
 
+	// Determine the workspace name
+	workspace, err := c.Workspace()
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+		return 1
+	}
+
+	// Check remote Terraform version is compatible
+	remoteVersionDiags := c.remoteBackendVersionCheck(b, workspace)
+	c.showDiagnostics(remoteVersionDiags)
+	if remoteVersionDiags.HasErrors() {
+		return 1
+	}
+
 	// Get the state manager for the currently-selected workspace
-	env := c.Workspace()
-	stateMgr, err := b.StateMgr(env)
+	stateMgr, err := b.StateMgr(workspace)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load destination state: %s", err))
 		return 1
 	}
 
 	if c.stateLock {
-		stateLocker := clistate.NewLocker(context.Background(), c.stateLockTimeout, c.Ui, c.Colorize())
-		if err := stateLocker.Lock(stateMgr, "state-push"); err != nil {
-			c.Ui.Error(fmt.Sprintf("Error locking state: %s", err))
+		stateLocker := clistate.NewLocker(c.stateLockTimeout, views.NewStateLocker(arguments.ViewHuman, c.View))
+		if diags := stateLocker.Lock(stateMgr, "state-push"); diags.HasErrors() {
+			c.showDiagnostics(diags)
 			return 1
 		}
-		defer stateLocker.Unlock(nil)
+		defer func() {
+			if diags := stateLocker.Unlock(); diags.HasErrors() {
+				c.showDiagnostics(diags)
+			}
+		}()
 	}
 
 	if err := stateMgr.RefreshState(); err != nil {
@@ -149,25 +167,3 @@ Options:
 func (c *StatePushCommand) Synopsis() string {
 	return "Update remote state from a local state file"
 }
-
-const errStatePushLineage = `
-The lineages do not match! The state will not be pushed.
-
-The "lineage" is a unique identifier given to a state on creation. It helps
-protect Terraform from overwriting a seemingly unrelated state file since it
-represents potentially losing real state.
-
-Please verify you're pushing the correct state. If you're sure you are, you
-can force the behavior with the "-force" flag.
-`
-
-const errStatePushSerialNewer = `
-The destination state has a higher serial number! The state will not be pushed.
-
-A higher serial could indicate that there is data in the destination state
-that was not present when the source state was created. As a protection measure,
-Terraform will not automatically overwrite this state.
-
-Please verify you're pushing the correct state. If you're sure you are, you
-can force the behavior with the "-force" flag.
-`

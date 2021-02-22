@@ -8,7 +8,6 @@ import (
 
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/backend/remote-state/inmem"
-	"github.com/hashicorp/terraform/helper/copy"
 	"github.com/hashicorp/terraform/states"
 	"github.com/mitchellh/cli"
 )
@@ -16,7 +15,7 @@ import (
 func TestStatePush_empty(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-good"), td)
+	testCopyDir(t, testFixturePath("state-push-good"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -24,10 +23,12 @@ func TestStatePush_empty(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -45,16 +46,18 @@ func TestStatePush_empty(t *testing.T) {
 func TestStatePush_lockedState(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-good"), td)
+	testCopyDir(t, testFixturePath("state-push-good"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -76,7 +79,7 @@ func TestStatePush_lockedState(t *testing.T) {
 func TestStatePush_replaceMatch(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-replace-match"), td)
+	testCopyDir(t, testFixturePath("state-push-replace-match"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -84,10 +87,12 @@ func TestStatePush_replaceMatch(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -105,13 +110,13 @@ func TestStatePush_replaceMatch(t *testing.T) {
 func TestStatePush_replaceMatchStdin(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-replace-match"), td)
+	testCopyDir(t, testFixturePath("state-push-replace-match"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
 	expected := testStateRead(t, "replace.tfstate")
 
-	// Setup the replacement to come from stdin
+	// Set up the replacement to come from stdin
 	var buf bytes.Buffer
 	if err := writeStateForTesting(expected, &buf); err != nil {
 		t.Fatalf("err: %s", err)
@@ -120,10 +125,12 @@ func TestStatePush_replaceMatchStdin(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -141,7 +148,7 @@ func TestStatePush_replaceMatchStdin(t *testing.T) {
 func TestStatePush_lineageMismatch(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-bad-lineage"), td)
+	testCopyDir(t, testFixturePath("state-push-bad-lineage"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -149,10 +156,12 @@ func TestStatePush_lineageMismatch(t *testing.T) {
 
 	p := testProvider()
 	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -170,7 +179,7 @@ func TestStatePush_lineageMismatch(t *testing.T) {
 func TestStatePush_serialNewer(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-serial-newer"), td)
+	testCopyDir(t, testFixturePath("state-push-serial-newer"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -178,10 +187,12 @@ func TestStatePush_serialNewer(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -199,7 +210,7 @@ func TestStatePush_serialNewer(t *testing.T) {
 func TestStatePush_serialOlder(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("state-push-serial-older"), td)
+	testCopyDir(t, testFixturePath("state-push-serial-older"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -207,10 +218,12 @@ func TestStatePush_serialOlder(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &StatePushCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -227,7 +240,7 @@ func TestStatePush_serialOlder(t *testing.T) {
 
 func TestStatePush_forceRemoteState(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("inmem-backend"), td)
+	testCopyDir(t, testFixturePath("inmem-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 	defer inmem.Reset()
@@ -237,8 +250,9 @@ func TestStatePush_forceRemoteState(t *testing.T) {
 
 	// init the backend
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	initCmd := &InitCommand{
-		Meta: Meta{Ui: ui},
+		Meta: Meta{Ui: ui, View: view},
 	}
 	if code := initCmd.Run([]string{}); code != 0 {
 		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
@@ -247,7 +261,7 @@ func TestStatePush_forceRemoteState(t *testing.T) {
 	// create a new workspace
 	ui = new(cli.MockUi)
 	newCmd := &WorkspaceNewCommand{
-		Meta: Meta{Ui: ui},
+		Meta: Meta{Ui: ui, View: view},
 	}
 	if code := newCmd.Run([]string{"test"}); code != 0 {
 		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter)
@@ -269,7 +283,7 @@ func TestStatePush_forceRemoteState(t *testing.T) {
 	// push our local state to that new workspace
 	ui = new(cli.MockUi)
 	c := &StatePushCommand{
-		Meta: Meta{Ui: ui},
+		Meta: Meta{Ui: ui, View: view},
 	}
 
 	args := []string{"-force", statePath}

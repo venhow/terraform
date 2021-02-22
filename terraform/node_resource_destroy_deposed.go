@@ -2,12 +2,13 @@ package terraform
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/dag"
 	"github.com/hashicorp/terraform/plans"
-	"github.com/hashicorp/terraform/providers"
 	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
 // ConcreteResourceInstanceDeposedNodeFunc is a callback type used to convert
@@ -37,7 +38,7 @@ var (
 	_ GraphNodeResourceInstance              = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferenceable                 = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferencer                    = (*NodePlanDeposedResourceInstanceObject)(nil)
-	_ GraphNodeEvalable                      = (*NodePlanDeposedResourceInstanceObject)(nil)
+	_ GraphNodeExecutable                    = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeProviderConsumer              = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeProvisionerConsumer           = (*NodePlanDeposedResourceInstanceObject)(nil)
 )
@@ -64,95 +65,22 @@ func (n *NodePlanDeposedResourceInstanceObject) References() []*addrs.Reference 
 }
 
 // GraphNodeEvalable impl.
-func (n *NodePlanDeposedResourceInstanceObject) EvalTree() EvalNode {
-	addr := n.ResourceInstanceAddr()
+func (n *NodePlanDeposedResourceInstanceObject) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
+	// Read the state for the deposed resource instance
+	state, err := n.readResourceInstanceStateDeposed(ctx, n.Addr, n.DeposedKey)
+	diags = diags.Append(err)
+	if diags.HasErrors() {
+		return diags
+	}
 
-	var provider providers.Interface
-	var providerSchema *ProviderSchema
-	var state *states.ResourceInstanceObject
+	change, destroyPlanDiags := n.planDestroy(ctx, state, n.DeposedKey)
+	diags = diags.Append(destroyPlanDiags)
+	if diags.HasErrors() {
+		return diags
+	}
 
-	seq := &EvalSequence{Nodes: make([]EvalNode, 0, 5)}
-
-	// During the refresh walk we will ensure that our record of the deposed
-	// object is up-to-date. If it was already deleted outside of Terraform
-	// then this will remove it from state and thus avoid us planning a
-	// destroy for it during the subsequent plan walk.
-	seq.Nodes = append(seq.Nodes, &EvalOpFilter{
-		Ops: []walkOperation{walkRefresh},
-		Node: &EvalSequence{
-			Nodes: []EvalNode{
-				&EvalGetProvider{
-					Addr:   n.ResolvedProvider,
-					Output: &provider,
-					Schema: &providerSchema,
-				},
-				&EvalReadStateDeposed{
-					Addr:           addr.Resource,
-					Provider:       &provider,
-					ProviderSchema: &providerSchema,
-					Key:            n.DeposedKey,
-					Output:         &state,
-				},
-				&EvalRefresh{
-					Addr:           addr.Resource,
-					ProviderAddr:   n.ResolvedProvider,
-					Provider:       &provider,
-					ProviderMetas:  n.ProviderMetas,
-					ProviderSchema: &providerSchema,
-					State:          &state,
-					Output:         &state,
-				},
-				&EvalWriteStateDeposed{
-					Addr:           addr.Resource,
-					Key:            n.DeposedKey,
-					ProviderAddr:   n.ResolvedProvider,
-					ProviderSchema: &providerSchema,
-					State:          &state,
-				},
-			},
-		},
-	})
-
-	// During the plan walk we always produce a planned destroy change, because
-	// destroying is the only supported action for deposed objects.
-	var change *plans.ResourceInstanceChange
-	seq.Nodes = append(seq.Nodes, &EvalOpFilter{
-		Ops: []walkOperation{walkPlan, walkPlanDestroy},
-		Node: &EvalSequence{
-			Nodes: []EvalNode{
-				&EvalGetProvider{
-					Addr:   n.ResolvedProvider,
-					Output: &provider,
-					Schema: &providerSchema,
-				},
-				&EvalReadStateDeposed{
-					Addr:           addr.Resource,
-					Output:         &state,
-					Key:            n.DeposedKey,
-					Provider:       &provider,
-					ProviderSchema: &providerSchema,
-				},
-				&EvalDiffDestroy{
-					Addr:         addr.Resource,
-					ProviderAddr: n.ResolvedProvider,
-					DeposedKey:   n.DeposedKey,
-					State:        &state,
-					Output:       &change,
-				},
-				&EvalWriteDiff{
-					Addr:           addr.Resource,
-					DeposedKey:     n.DeposedKey,
-					ProviderSchema: &providerSchema,
-					Change:         &change,
-				},
-				// Since deposed objects cannot be referenced by expressions
-				// elsewhere, we don't need to also record the planned new
-				// state in this case.
-			},
-		},
-	})
-
-	return seq
+	diags = diags.Append(n.writeChange(ctx, change, n.DeposedKey))
+	return diags
 }
 
 // NodeDestroyDeposedResourceInstanceObject represents deposed resource
@@ -173,7 +101,7 @@ var (
 	_ GraphNodeDestroyerCBD                  = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferenceable                 = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferencer                    = (*NodeDestroyDeposedResourceInstanceObject)(nil)
-	_ GraphNodeEvalable                      = (*NodeDestroyDeposedResourceInstanceObject)(nil)
+	_ GraphNodeExecutable                    = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeProviderConsumer              = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeProvisionerConsumer           = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 )
@@ -221,74 +149,44 @@ func (n *NodeDestroyDeposedResourceInstanceObject) ModifyCreateBeforeDestroy(v b
 	return nil
 }
 
-// GraphNodeEvalable impl.
-func (n *NodeDestroyDeposedResourceInstanceObject) EvalTree() EvalNode {
-	addr := n.ResourceInstanceAddr()
-
-	var provider providers.Interface
-	var providerSchema *ProviderSchema
-	var state *states.ResourceInstanceObject
+// GraphNodeExecutable impl.
+func (n *NodeDestroyDeposedResourceInstanceObject) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
 	var change *plans.ResourceInstanceChange
-	var err error
 
-	return &EvalSequence{
-		Nodes: []EvalNode{
-			&EvalGetProvider{
-				Addr:   n.ResolvedProvider,
-				Output: &provider,
-				Schema: &providerSchema,
-			},
-			&EvalReadStateDeposed{
-				Addr:           addr.Resource,
-				Output:         &state,
-				Key:            n.DeposedKey,
-				Provider:       &provider,
-				ProviderSchema: &providerSchema,
-			},
-			&EvalDiffDestroy{
-				Addr:         addr.Resource,
-				ProviderAddr: n.ResolvedProvider,
-				State:        &state,
-				Output:       &change,
-			},
-			// Call pre-apply hook
-			&EvalApplyPre{
-				Addr:   addr.Resource,
-				State:  &state,
-				Change: &change,
-			},
-			&EvalApply{
-				Addr:           addr.Resource,
-				Config:         nil, // No configuration because we are destroying
-				State:          &state,
-				Change:         &change,
-				Provider:       &provider,
-				ProviderAddr:   n.ResolvedProvider,
-				ProviderSchema: &providerSchema,
-				Output:         &state,
-				Error:          &err,
-			},
-			// Always write the resource back to the state deposed... if it
-			// was successfully destroyed it will be pruned. If it was not, it will
-			// be caught on the next run.
-			&EvalWriteStateDeposed{
-				Addr:           addr.Resource,
-				Key:            n.DeposedKey,
-				ProviderAddr:   n.ResolvedProvider,
-				ProviderSchema: &providerSchema,
-				State:          &state,
-			},
-			&EvalApplyPost{
-				Addr:  addr.Resource,
-				State: &state,
-				Error: &err,
-			},
-			&EvalReturnError{
-				Error: &err,
-			},
-			&EvalUpdateStateHook{},
-		},
+	// Read the state for the deposed resource instance
+	state, err := n.readResourceInstanceStateDeposed(ctx, n.Addr, n.DeposedKey)
+	if err != nil {
+		return diags.Append(err)
 	}
+
+	change, destroyPlanDiags := n.planDestroy(ctx, state, n.DeposedKey)
+	diags = diags.Append(destroyPlanDiags)
+	if diags.HasErrors() {
+		return diags
+	}
+
+	// Call pre-apply hook
+	diags = diags.Append(n.preApplyHook(ctx, change))
+	if diags.HasErrors() {
+		return diags
+	}
+
+	// we pass a nil configuration to apply because we are destroying
+	state, applyDiags := n.apply(ctx, state, change, nil, false)
+	diags = diags.Append(applyDiags)
+	// don't return immediately on errors, we need to handle the state
+
+	// Always write the resource back to the state deposed. If it
+	// was successfully destroyed it will be pruned. If it was not, it will
+	// be caught on the next run.
+	err = n.writeResourceInstanceState(ctx, state)
+	if err != nil {
+		return diags.Append(err)
+	}
+
+	diags = diags.Append(n.postApplyHook(ctx, state, diags.Err()))
+
+	return diags.Append(updateStateHook(ctx))
 }
 
 // GraphNodeDeposer is an optional interface implemented by graph nodes that
@@ -311,4 +209,47 @@ type graphNodeDeposer struct {
 
 func (n *graphNodeDeposer) SetPreallocatedDeposedKey(key states.DeposedKey) {
 	n.PreallocatedDeposedKey = key
+}
+
+func (n *NodeDestroyDeposedResourceInstanceObject) writeResourceInstanceState(ctx EvalContext, obj *states.ResourceInstanceObject) error {
+	absAddr := n.Addr
+	key := n.DeposedKey
+	state := ctx.State()
+
+	if key == states.NotDeposed {
+		// should never happen
+		return fmt.Errorf("can't save deposed object for %s without a deposed key; this is a bug in Terraform that should be reported", absAddr)
+	}
+
+	if obj == nil {
+		// No need to encode anything: we'll just write it directly.
+		state.SetResourceInstanceDeposed(absAddr, key, nil, n.ResolvedProvider)
+		log.Printf("[TRACE] writeResourceInstanceStateDeposed: removing state object for %s deposed %s", absAddr, key)
+		return nil
+	}
+
+	_, providerSchema, err := getProvider(ctx, n.ResolvedProvider)
+	if err != nil {
+		return err
+	}
+	if providerSchema == nil {
+		// Should never happen, unless our state object is nil
+		panic("writeResourceInstanceStateDeposed used with no ProviderSchema object")
+	}
+
+	schema, currentVersion := providerSchema.SchemaForResourceAddr(absAddr.ContainingResource().Resource)
+	if schema == nil {
+		// It shouldn't be possible to get this far in any real scenario
+		// without a schema, but we might end up here in contrived tests that
+		// fail to set up their world properly.
+		return fmt.Errorf("failed to encode %s in state: no resource type schema available", absAddr)
+	}
+	src, err := obj.Encode(schema.ImpliedType(), currentVersion)
+	if err != nil {
+		return fmt.Errorf("failed to encode %s in state: %s", absAddr, err)
+	}
+
+	log.Printf("[TRACE] writeResourceInstanceStateDeposed: writing state object for %s deposed %s", absAddr, key)
+	state.SetResourceInstanceDeposed(absAddr, key, src, n.ResolvedProvider)
+	return nil
 }

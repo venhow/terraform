@@ -7,10 +7,13 @@ package backend
 import (
 	"context"
 	"errors"
-	"time"
+	"io/ioutil"
+	"log"
+	"os"
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/command/clistate"
+	"github.com/hashicorp/terraform/command/views"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configload"
 	"github.com/hashicorp/terraform/configs/configschema"
@@ -20,6 +23,7 @@ import (
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/hashicorp/terraform/tfdiags"
+	"github.com/mitchellh/go-homedir"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -33,10 +37,6 @@ var (
 	// be selected.
 	ErrDefaultWorkspaceNotSupported = errors.New("default workspace not supported\n" +
 		"You can create a new workspace with the \"workspace new\" command.")
-
-	// ErrOperationNotSupported is returned when an unsupported operation
-	// is detected by the configured backend.
-	ErrOperationNotSupported = errors.New("operation not supported")
 
 	// ErrWorkspacesNotSupported is an error returned when a caller attempts
 	// to perform an operation on a workspace other than "default" for a
@@ -183,18 +183,21 @@ type Operation struct {
 	// configuration from ConfigDir.
 	ConfigLoader *configload.Loader
 
+	// Hooks can be used to perform actions triggered by various events during
+	// the operation's lifecycle.
+	Hooks []terraform.Hook
+
 	// Plan is a plan that was passed as an argument. This is valid for
 	// plan and apply arguments but may not work for all backends.
 	PlanFile *planfile.Reader
 
 	// The options below are more self-explanatory and affect the runtime
 	// behavior of the operation.
-	AutoApprove  bool
-	Destroy      bool
-	DestroyForce bool
-	Parallelism  int
-	Targets      []addrs.Targetable
-	Variables    map[string]UnparsedVariableValue
+	AutoApprove bool
+	Destroy     bool
+	Parallelism int
+	Targets     []addrs.Targetable
+	Variables   map[string]UnparsedVariableValue
 
 	// Some operations use root module variables only opportunistically or
 	// don't need them at all. If this flag is set, the backend must treat
@@ -206,20 +209,22 @@ type Operation struct {
 	// the variables set in the plan are used instead, and they must be valid.
 	AllowUnsetVariables bool
 
+	// View implements the logic for all UI interactions.
+	View views.Operation
+
 	// Input/output/control options.
 	UIIn  terraform.UIInput
 	UIOut terraform.UIOutput
 
-	// If LockState is true, the Operation must Lock any
-	// statemgr.Lockers for its duration, and Unlock when complete.
-	LockState bool
+	// ShowDiagnostics prints diagnostic messages to the UI.
+	ShowDiagnostics func(vals ...interface{})
 
 	// StateLocker is used to lock the state while providing UI feedback to the
-	// user. This will be supplied by the Backend itself.
+	// user. This will be replaced by the Backend to update the context.
+	//
+	// If state locking is not necessary, this should be set to a no-op
+	// implementation of clistate.Locker.
 	StateLocker clistate.Locker
-
-	// The duration to retry obtaining a State lock.
-	StateLockTimeout time.Duration
 
 	// Workspace is the name of the workspace that this operation should run
 	// in, which controls which named state is used.
@@ -240,6 +245,39 @@ func (o *Operation) Config() (*configs.Config, tfdiags.Diagnostics) {
 	config, hclDiags := o.ConfigLoader.LoadConfig(o.ConfigDir)
 	diags = diags.Append(hclDiags)
 	return config, diags
+}
+
+// ReportResult is a helper for the common chore of setting the status of
+// a running operation and showing any diagnostics produced during that
+// operation.
+//
+// If the given diagnostics contains errors then the operation's result
+// will be set to backend.OperationFailure. It will be set to
+// backend.OperationSuccess otherwise. It will then use b.ShowDiagnostics
+// to show the given diagnostics before returning.
+//
+// Callers should feel free to do each of these operations separately in
+// more complex cases where e.g. diagnostics are interleaved with other
+// output, but terminating immediately after reporting error diagnostics is
+// common and can be expressed concisely via this method.
+func (o *Operation) ReportResult(op *RunningOperation, diags tfdiags.Diagnostics) {
+	if diags.HasErrors() {
+		op.Result = OperationFailure
+	} else {
+		op.Result = OperationSuccess
+	}
+	if o.ShowDiagnostics != nil {
+		o.ShowDiagnostics(diags)
+	} else {
+		// Shouldn't generally happen, but if it does then we'll at least
+		// make some noise in the logs to help us spot it.
+		if len(diags) != 0 {
+			log.Printf(
+				"[ERROR] Backend needs to report diagnostics but ShowDiagnostics is not set:\n%s",
+				diags.ErrWithWarnings(),
+			)
+		}
+	}
 }
 
 // RunningOperation is the result of starting an operation.
@@ -290,4 +328,32 @@ const (
 
 func (r OperationResult) ExitStatus() int {
 	return int(r)
+}
+
+// If the argument is a path, Read loads it and returns the contents,
+// otherwise the argument is assumed to be the desired contents and is simply
+// returned.
+func ReadPathOrContents(poc string) (string, error) {
+	if len(poc) == 0 {
+		return poc, nil
+	}
+
+	path := poc
+	if path[0] == '~' {
+		var err error
+		path, err = homedir.Expand(path)
+		if err != nil {
+			return path, err
+		}
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		contents, err := ioutil.ReadFile(path)
+		if err != nil {
+			return string(contents), err
+		}
+		return string(contents), nil
+	}
+
+	return poc, nil
 }

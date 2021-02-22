@@ -6,13 +6,14 @@ import (
 	"io/ioutil"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
-	"github.com/hashicorp/terraform/builtin/providers/test"
 	"github.com/hashicorp/terraform/e2e"
-	grpcplugin "github.com/hashicorp/terraform/helper/plugin"
+	"github.com/hashicorp/terraform/internal/grpcwrap"
+	simple "github.com/hashicorp/terraform/internal/provider-simple"
 	proto "github.com/hashicorp/terraform/internal/tfplugin5"
 	tfplugin "github.com/hashicorp/terraform/plugin"
 )
@@ -40,19 +41,52 @@ type reattachConfigAddr struct {
 }
 
 type providerServer struct {
-	*grpcplugin.GRPCProviderServer
+	sync.Mutex
+	proto.ProviderServer
 	planResourceChangeCalled  bool
 	applyResourceChangeCalled bool
 }
 
 func (p *providerServer) PlanResourceChange(ctx context.Context, req *proto.PlanResourceChange_Request) (*proto.PlanResourceChange_Response, error) {
+	p.Lock()
+	defer p.Unlock()
+
 	p.planResourceChangeCalled = true
-	return p.GRPCProviderServer.PlanResourceChange(ctx, req)
+	return p.ProviderServer.PlanResourceChange(ctx, req)
 }
 
 func (p *providerServer) ApplyResourceChange(ctx context.Context, req *proto.ApplyResourceChange_Request) (*proto.ApplyResourceChange_Response, error) {
+	p.Lock()
+	defer p.Unlock()
+
 	p.applyResourceChangeCalled = true
-	return p.GRPCProviderServer.ApplyResourceChange(ctx, req)
+	return p.ProviderServer.ApplyResourceChange(ctx, req)
+}
+
+func (p *providerServer) PlanResourceChangeCalled() bool {
+	p.Lock()
+	defer p.Unlock()
+
+	return p.planResourceChangeCalled
+}
+func (p *providerServer) ResetPlanResourceChangeCalled() {
+	p.Lock()
+	defer p.Unlock()
+
+	p.planResourceChangeCalled = false
+}
+
+func (p *providerServer) ApplyResourceChangeCalled() bool {
+	p.Lock()
+	defer p.Unlock()
+
+	return p.applyResourceChangeCalled
+}
+func (p *providerServer) ResetApplyResourceChangeCalled() {
+	p.Lock()
+	defer p.Unlock()
+
+	p.applyResourceChangeCalled = false
 }
 
 func TestUnmanagedSeparatePlan(t *testing.T) {
@@ -65,7 +99,7 @@ func TestUnmanagedSeparatePlan(t *testing.T) {
 	reattachCh := make(chan *plugin.ReattachConfig)
 	closeCh := make(chan struct{})
 	provider := &providerServer{
-		GRPCProviderServer: grpcplugin.NewGRPCProviderServerShim(test.Provider()),
+		ProviderServer: grpcwrap.Provider(simple.Provider()),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -106,6 +140,10 @@ func TestUnmanagedSeparatePlan(t *testing.T) {
 			},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tf.AddEnv("TF_REATTACH_PROVIDERS=" + string(reattachStr))
 	tf.AddEnv("PLUGIN_PROTOCOL_VERSION=5")
 
@@ -129,8 +167,8 @@ func TestUnmanagedSeparatePlan(t *testing.T) {
 		t.Fatalf("unexpected plan error: %s\nstderr:\n%s", err, stderr)
 	}
 
-	if !provider.planResourceChangeCalled {
-		t.Error("PlanResourceChange not called on in-process provider")
+	if !provider.PlanResourceChangeCalled() {
+		t.Error("PlanResourceChange not called on un-managed provider")
 	}
 
 	//// APPLY
@@ -139,10 +177,10 @@ func TestUnmanagedSeparatePlan(t *testing.T) {
 		t.Fatalf("unexpected apply error: %s\nstderr:\n%s", err, stderr)
 	}
 
-	if !provider.applyResourceChangeCalled {
-		t.Error("ApplyResourceChange not called on in-process provider")
+	if !provider.ApplyResourceChangeCalled() {
+		t.Error("ApplyResourceChange not called on un-managed provider")
 	}
-	provider.applyResourceChangeCalled = false
+	provider.ResetApplyResourceChangeCalled()
 
 	//// DESTROY
 	_, stderr, err = tf.Run("destroy", "-auto-approve")
@@ -150,7 +188,7 @@ func TestUnmanagedSeparatePlan(t *testing.T) {
 		t.Fatalf("unexpected destroy error: %s\nstderr:\n%s", err, stderr)
 	}
 
-	if !provider.applyResourceChangeCalled {
+	if !provider.ApplyResourceChangeCalled() {
 		t.Error("ApplyResourceChange (destroy) not called on in-process provider")
 	}
 	cancel()

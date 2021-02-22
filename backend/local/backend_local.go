@@ -8,7 +8,6 @@ import (
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/command/clistate"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configload"
 	"github.com/hashicorp/terraform/plans/planfile"
@@ -24,11 +23,7 @@ func (b *Local) Context(op *backend.Operation) (*terraform.Context, statemgr.Ful
 	// to ask for input/validate.
 	op.Type = backend.OperationTypeInvalid
 
-	if op.LockState {
-		op.StateLocker = clistate.NewLocker(context.Background(), op.StateLockTimeout, b.CLI, b.Colorize())
-	} else {
-		op.StateLocker = clistate.NewNoopLocker()
-	}
+	op.StateLocker = op.StateLocker.WithContext(context.Background())
 
 	ctx, _, stateMgr, diags := b.context(op)
 	return ctx, stateMgr, diags
@@ -45,8 +40,7 @@ func (b *Local) context(op *backend.Operation) (*terraform.Context, *configload.
 		return nil, nil, nil, diags
 	}
 	log.Printf("[TRACE] backend/local: requesting state lock for workspace %q", op.Workspace)
-	if err := op.StateLocker.Lock(s, op.Type.String()); err != nil {
-		diags = diags.Append(errwrap.Wrapf("Error locking state: {{err}}", err))
+	if diags := op.StateLocker.Lock(s, op.Type.String()); diags.HasErrors() {
 		return nil, nil, nil, diags
 	}
 
@@ -54,10 +48,7 @@ func (b *Local) context(op *backend.Operation) (*terraform.Context, *configload.
 		// If we're returning with errors, and thus not producing a valid
 		// context, we'll want to avoid leaving the workspace locked.
 		if diags.HasErrors() {
-			err := op.StateLocker.Unlock(nil)
-			if err != nil {
-				diags = diags.Append(errwrap.Wrapf("Error unlocking state: {{err}}", err))
-			}
+			diags = diags.Append(op.StateLocker.Unlock())
 		}
 	}()
 
@@ -77,19 +68,18 @@ func (b *Local) context(op *backend.Operation) (*terraform.Context, *configload.
 	opts.Destroy = op.Destroy
 	opts.Targets = op.Targets
 	opts.UIInput = op.UIIn
+	opts.Hooks = op.Hooks
+
+	opts.SkipRefresh = op.Type != backend.OperationTypeRefresh && !op.PlanRefresh
+	if opts.SkipRefresh {
+		log.Printf("[DEBUG] backend/local: skipping refresh of managed resources")
+	}
 
 	// Load the latest state. If we enter contextFromPlanFile below then the
 	// state snapshot in the plan file must match this, or else it'll return
 	// error diagnostics.
 	log.Printf("[TRACE] backend/local: retrieving local state snapshot for workspace %q", op.Workspace)
 	opts.State = s.State()
-
-	// Prepare a separate opts and context for validation, which doesn't use
-	// any state ensuring that we only validate the config, since evaluation
-	// will automatically reference the state when available.
-	validateOpts := opts
-	validateOpts.State = nil
-	var validateCtx *terraform.Context
 
 	var tfCtx *terraform.Context
 	var ctxDiags tfdiags.Diagnostics
@@ -108,18 +98,9 @@ func (b *Local) context(op *backend.Operation) (*terraform.Context, *configload.
 		// Write sources into the cache of the main loader so that they are
 		// available if we need to generate diagnostic message snippets.
 		op.ConfigLoader.ImportSourcesFromSnapshot(configSnap)
-
-		// create a validation context with no state
-		validateCtx, _, _ = b.contextFromPlanFile(op.PlanFile, validateOpts, stateMeta)
-		// diags from here will be caught above
-
 	} else {
 		log.Printf("[TRACE] backend/local: building context for current working directory")
 		tfCtx, configSnap, ctxDiags = b.contextDirect(op, opts)
-
-		// create a validation context with no state
-		validateCtx, _, _ = b.contextDirect(op, validateOpts)
-		// diags from here will be caught above
 	}
 	diags = diags.Append(ctxDiags)
 	if diags.HasErrors() {
@@ -145,7 +126,7 @@ func (b *Local) context(op *backend.Operation) (*terraform.Context, *configload.
 		// If validation is enabled, validate
 		if b.OpValidation {
 			log.Printf("[TRACE] backend/local: running validation operation")
-			validateDiags := validateCtx.Validate()
+			validateDiags := tfCtx.Validate()
 			diags = diags.Append(validateDiags)
 		}
 	}
@@ -231,7 +212,7 @@ func (b *Local) contextFromPlanFile(pf *planfile.Reader, opts terraform.ContextO
 		// If the caller sets this, we require that the stored prior state
 		// has the same metadata, which is an extra safety check that nothing
 		// has changed since the plan was created. (All of the "real-world"
-		// state manager implementstions support this, but simpler test backends
+		// state manager implementations support this, but simpler test backends
 		// may not.)
 		if currentStateMeta.Lineage != "" && priorStateFile.Lineage != "" {
 			if priorStateFile.Serial != currentStateMeta.Serial || priorStateFile.Lineage != currentStateMeta.Lineage {

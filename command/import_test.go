@@ -12,9 +12,8 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/copy"
+	"github.com/hashicorp/terraform/internal/copy"
 	"github.com/hashicorp/terraform/providers"
-	"github.com/hashicorp/terraform/terraform"
 	"github.com/hashicorp/terraform/tfdiags"
 )
 
@@ -25,15 +24,17 @@ func TestImport(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -43,11 +44,13 @@ func TestImport(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
@@ -76,15 +79,17 @@ func TestImport_providerConfig(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -94,38 +99,42 @@ func TestImport_providerConfig(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
 			},
 		},
-		ResourceTypes: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
 	}
 
 	configured := false
-	p.ConfigureNewFn = func(req providers.ConfigureRequest) providers.ConfigureResponse {
+	p.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
 		configured = true
 
 		cfg := req.Config
 		if !cfg.Type().HasAttribute("foo") {
-			return providers.ConfigureResponse{
+			return providers.ConfigureProviderResponse{
 				Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("configuration has no foo argument")),
 			}
 		}
 		if got, want := cfg.GetAttr("foo"), cty.StringVal("bar"); !want.RawEquals(got) {
-			return providers.ConfigureResponse{
+			return providers.ConfigureProviderResponse{
 				Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("foo argument is %#v, but want %#v", got, want)),
 			}
 		}
 
-		return providers.ConfigureResponse{}
+		return providers.ConfigureProviderResponse{}
 	}
 
 	args := []string{
@@ -152,7 +161,7 @@ func TestImport_providerConfig(t *testing.T) {
 // "remote" state provided by the "local" backend
 func TestImport_remoteState(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("import-provider-remote-state"), td)
+	testCopyDir(t, testFixturePath("import-provider-remote-state"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -165,9 +174,11 @@ func TestImport_remoteState(t *testing.T) {
 
 	// init our backend
 	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	m := Meta{
 		testingOverrides: metaOverridesForProvider(testProvider()),
 		Ui:               ui,
+		View:             view,
 		ProviderSource:   providerSource,
 	}
 
@@ -187,11 +198,12 @@ func TestImport_remoteState(t *testing.T) {
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -201,29 +213,33 @@ func TestImport_remoteState(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
 			},
 		},
-		ResourceTypes: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
 	}
 
 	configured := false
-	p.ConfigureNewFn = func(req providers.ConfigureRequest) providers.ConfigureResponse {
+	p.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
 		var diags tfdiags.Diagnostics
 		configured = true
 		if got, want := req.Config.GetAttr("foo"), cty.StringVal("bar"); !want.RawEquals(got) {
 			diags = diags.Append(fmt.Errorf("wrong \"foo\" value %#v; want %#v", got, want))
 		}
-		return providers.ConfigureResponse{
+		return providers.ConfigureProviderResponse{
 			Diagnostics: diags,
 		}
 	}
@@ -258,7 +274,7 @@ func TestImport_remoteState(t *testing.T) {
 // early failure on import should not leave stale lock
 func TestImport_initializationErrorShouldUnlock(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("import-provider-remote-state"), td)
+	testCopyDir(t, testFixturePath("import-provider-remote-state"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -271,9 +287,11 @@ func TestImport_initializationErrorShouldUnlock(t *testing.T) {
 
 	// init our backend
 	ui := cli.NewMockUi()
+	view, _ := testView(t)
 	m := Meta{
 		testingOverrides: metaOverridesForProvider(testProvider()),
 		Ui:               ui,
+		View:             view,
 		ProviderSource:   providerSource,
 	}
 
@@ -296,6 +314,7 @@ func TestImport_initializationErrorShouldUnlock(t *testing.T) {
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -330,15 +349,17 @@ func TestImport_providerConfigWithVar(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -348,29 +369,33 @@ func TestImport_providerConfigWithVar(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
 			},
 		},
-		ResourceTypes: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
 	}
 
 	configured := false
-	p.ConfigureNewFn = func(req providers.ConfigureRequest) providers.ConfigureResponse {
+	p.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
 		var diags tfdiags.Diagnostics
 		configured = true
 		if got, want := req.Config.GetAttr("foo"), cty.StringVal("bar"); !want.RawEquals(got) {
 			diags = diags.Append(fmt.Errorf("wrong \"foo\" value %#v; want %#v", got, want))
 		}
-		return providers.ConfigureResponse{
+		return providers.ConfigureProviderResponse{
 			Diagnostics: diags,
 		}
 	}
@@ -404,15 +429,17 @@ func TestImport_providerConfigWithDataSource(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -422,23 +449,29 @@ func TestImport_providerConfigWithDataSource(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
-			},
-		},
-		ResourceTypes: map[string]*configschema.Block{
-			"test_instance": {
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+					"foo": {Type: cty.String, Optional: true},
 				},
 			},
 		},
-		DataSources: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
+			"test_instance": {
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
+				},
+			},
+		},
+		DataSources: map[string]providers.Schema{
 			"test_data": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"foo": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
@@ -461,15 +494,17 @@ func TestImport_providerConfigWithVarDefault(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -479,29 +514,33 @@ func TestImport_providerConfigWithVarDefault(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
 			},
 		},
-		ResourceTypes: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
 	}
 
 	configured := false
-	p.ConfigureNewFn = func(req providers.ConfigureRequest) providers.ConfigureResponse {
+	p.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
 		var diags tfdiags.Diagnostics
 		configured = true
 		if got, want := req.Config.GetAttr("foo"), cty.StringVal("bar"); !want.RawEquals(got) {
 			diags = diags.Append(fmt.Errorf("wrong \"foo\" value %#v; want %#v", got, want))
 		}
-		return providers.ConfigureResponse{
+		return providers.ConfigureProviderResponse{
 			Diagnostics: diags,
 		}
 	}
@@ -534,15 +573,17 @@ func TestImport_providerConfigWithVarFile(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -552,29 +593,33 @@ func TestImport_providerConfigWithVarFile(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		Provider: &configschema.Block{
-			Attributes: map[string]*configschema.Attribute{
-				"foo": {Type: cty.String, Optional: true},
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
 			},
 		},
-		ResourceTypes: map[string]*configschema.Block{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
 	}
 
 	configured := false
-	p.ConfigureNewFn = func(req providers.ConfigureRequest) providers.ConfigureResponse {
+	p.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
 		var diags tfdiags.Diagnostics
 		configured = true
 		if got, want := req.Config.GetAttr("foo"), cty.StringVal("bar"); !want.RawEquals(got) {
 			diags = diags.Append(fmt.Errorf("wrong \"foo\" value %#v; want %#v", got, want))
 		}
-		return providers.ConfigureResponse{
+		return providers.ConfigureProviderResponse{
 			Diagnostics: diags,
 		}
 	}
@@ -608,15 +653,17 @@ func TestImport_allowMissingResourceConfig(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
 	p.ImportResourceStateFn = nil
-	p.ImportResourceStateResponse = providers.ImportResourceStateResponse{
+	p.ImportResourceStateResponse = &providers.ImportResourceStateResponse{
 		ImportedResources: []providers.ImportedResource{
 			{
 				TypeName: "test_instance",
@@ -626,11 +673,13 @@ func TestImport_allowMissingResourceConfig(t *testing.T) {
 			},
 		},
 	}
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"id": {Type: cty.String, Optional: true, Computed: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Optional: true, Computed: true},
+					},
 				},
 			},
 		},
@@ -661,10 +710,12 @@ func TestImport_emptyConfig(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -691,10 +742,12 @@ func TestImport_missingResourceConfig(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -721,10 +774,12 @@ func TestImport_missingModuleConfig(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -746,18 +801,20 @@ func TestImport_missingModuleConfig(t *testing.T) {
 
 func TestImportModuleVarFile(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("import-module-var-file"), td)
+	testCopyDir(t, testFixturePath("import-module-var-file"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
 	statePath := testTempFile(t)
 
 	p := testProvider()
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"foo": {Type: cty.String, Optional: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"foo": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
@@ -770,9 +827,11 @@ func TestImportModuleVarFile(t *testing.T) {
 
 	// init to install the module
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	m := Meta{
 		testingOverrides: metaOverridesForProvider(testProvider()),
 		Ui:               ui,
+		View:             view,
 		ProviderSource:   providerSource,
 	}
 
@@ -789,6 +848,82 @@ func TestImportModuleVarFile(t *testing.T) {
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
+		},
+	}
+	args := []string{
+		"-state", statePath,
+		"module.child.test_instance.foo",
+		"bar",
+	}
+	code := c.Run(args)
+	if code != 0 {
+		t.Fatalf("import failed; expected success")
+	}
+}
+
+// This test covers an edge case where a module with a complex input variable
+// of nested objects has an invalid default which is overridden by the calling
+// context, and is used in locals. If we don't evaluate module call variables
+// for the import walk, this results in an error.
+//
+// The specific example has a variable "foo" which is a nested object:
+//
+//   foo = { bar = { baz = true } }
+//
+// This is used as foo = var.foo in the call to the child module, which then
+// uses the traversal foo.bar.baz in a local. A default value in the child
+// module of {} causes this local evaluation to error, breaking import.
+func TestImportModuleInputVariableEvaluation(t *testing.T) {
+	td := tempDir(t)
+	testCopyDir(t, testFixturePath("import-module-input-variable"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	statePath := testTempFile(t)
+
+	p := testProvider()
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
+			"test_instance": {
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"foo": {Type: cty.String, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	providerSource, close := newMockProviderSource(t, map[string][]string{
+		"test": {"1.2.3"},
+	})
+	defer close()
+
+	// init to install the module
+	ui := new(cli.MockUi)
+	view, _ := testView(t)
+	m := Meta{
+		testingOverrides: metaOverridesForProvider(testProvider()),
+		Ui:               ui,
+		View:             view,
+		ProviderSource:   providerSource,
+	}
+
+	ic := &InitCommand{
+		Meta: m,
+	}
+	if code := ic.Run([]string{}); code != 0 {
+		t.Fatalf("init failed\n%s", ui.ErrorWriter)
+	}
+
+	// import
+	ui = new(cli.MockUi)
+	c := &ImportCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+			View:             view,
 		},
 	}
 	args := []string{
@@ -809,10 +944,12 @@ func TestImport_dataResource(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -839,10 +976,12 @@ func TestImport_invalidResourceAddr(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -869,10 +1008,12 @@ func TestImport_targetIsModule(t *testing.T) {
 
 	p := testProvider()
 	ui := new(cli.MockUi)
+	view, _ := testView(t)
 	c := &ImportCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
+			View:             view,
 		},
 	}
 
@@ -896,16 +1037,4 @@ const testImportStr = `
 test_instance.foo:
   ID = yay
   provider = provider["registry.terraform.io/hashicorp/test"]
-`
-
-const testImportCustomProviderStr = `
-test_instance.foo:
-  ID = yay
-  provider = provider["registry.terraform.io/hashicorp/test"].alias
-`
-
-const testImportProviderMismatchStr = `
-test_instance.foo:
-  ID = yay
-  provider = provider["registry.terraform.io/hashicorp/test-beta"]
 `

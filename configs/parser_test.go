@@ -38,16 +38,6 @@ func testParser(files map[string]string) *Parser {
 	return NewParser(fs)
 }
 
-// testModuleFromFile reads a single file, wraps it in a module, and returns
-// it. This is a helper for use in unit tests.
-func testModuleFromFile(filename string) (*Module, hcl.Diagnostics) {
-	parser := NewParser(nil)
-	f, diags := parser.LoadConfigFile(filename)
-	mod, modDiags := NewModule([]*File{f}, nil)
-	diags = append(diags, modDiags...)
-	return mod, modDiags
-}
-
 // testModuleConfigFrom File reads a single file from the given path as a
 // module and returns its configuration. This is a helper for use in unit tests.
 func testModuleConfigFromFile(filename string) (*Config, hcl.Diagnostics) {
@@ -83,13 +73,12 @@ func testNestedModuleConfigFromDir(t *testing.T, path string) (*Config, hcl.Diag
 
 	parser := NewParser(nil)
 	mod, diags := parser.LoadConfigDir(path)
-	assertNoDiagnostics(t, diags)
 	if mod == nil {
 		t.Fatal("got nil root module; want non-nil")
 	}
 
 	versionI := 0
-	cfg, diags := BuildConfig(mod, ModuleWalkerFunc(
+	cfg, nestedDiags := BuildConfig(mod, ModuleWalkerFunc(
 		func(req *ModuleRequest) (*Module, *version.Version, hcl.Diagnostics) {
 			// For the sake of this test we're going to just treat our
 			// SourceAddr as a path relative to the calling module.
@@ -111,6 +100,8 @@ func testNestedModuleConfigFromDir(t *testing.T, path string) (*Config, hcl.Diag
 			return mod, version, diags
 		},
 	))
+
+	diags = append(diags, nestedDiags...)
 	return cfg, diags
 }
 

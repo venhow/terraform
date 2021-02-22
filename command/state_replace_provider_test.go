@@ -65,17 +65,19 @@ func TestStateReplaceProvider(t *testing.T) {
 		statePath := testStateFile(t, state)
 
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
 
 		inputBuf := &bytes.Buffer{}
 		ui.InputReader = inputBuf
-		inputBuf.WriteString("yes")
+		inputBuf.WriteString("yes\n")
 
 		args := []string{
 			"-state", statePath,
@@ -99,10 +101,12 @@ func TestStateReplaceProvider(t *testing.T) {
 		statePath := testStateFile(t, state)
 
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
@@ -133,17 +137,19 @@ func TestStateReplaceProvider(t *testing.T) {
 		statePath := testStateFile(t, state)
 
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
 
 		inputBuf := &bytes.Buffer{}
 		ui.InputReader = inputBuf
-		inputBuf.WriteString("no")
+		inputBuf.WriteString("no\n")
 
 		args := []string{
 			"-state", statePath,
@@ -166,10 +172,12 @@ func TestStateReplaceProvider(t *testing.T) {
 		statePath := testStateFile(t, state)
 
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
@@ -193,10 +201,12 @@ func TestStateReplaceProvider(t *testing.T) {
 
 	t.Run("invalid flags", func(t *testing.T) {
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
@@ -217,10 +227,12 @@ func TestStateReplaceProvider(t *testing.T) {
 
 	t.Run("wrong number of arguments", func(t *testing.T) {
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}
@@ -237,10 +249,12 @@ func TestStateReplaceProvider(t *testing.T) {
 
 	t.Run("invalid provider strings", func(t *testing.T) {
 		ui := new(cli.MockUi)
+		view, _ := testView(t)
 		c := &StateReplaceProviderCommand{
 			StateMeta{
 				Meta: Meta{
-					Ui: ui,
+					Ui:   ui,
+					View: view,
 				},
 			},
 		}

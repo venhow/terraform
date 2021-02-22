@@ -20,6 +20,8 @@ import (
 	"github.com/hashicorp/terraform/tfdiags"
 )
 
+var planConfigurationVersionsPollInterval = 500 * time.Millisecond
+
 func (b *Remote) opPlan(stopCtx, cancelCtx context.Context, op *backend.Operation, w *tfe.Workspace) (*tfe.Run, error) {
 	log.Printf("[INFO] backend/remote: starting Plan operation")
 
@@ -213,7 +215,7 @@ in order to capture the filesystem context the remote workspace expects:
 			return nil, context.Canceled
 		case <-cancelCtx.Done():
 			return nil, context.Canceled
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(planConfigurationVersionsPollInterval):
 			cv, err = b.client.ConfigurationVersions.Read(stopCtx, cv.ID)
 			if err != nil {
 				return nil, generalError("Failed to retrieve configuration version", err)
@@ -258,15 +260,16 @@ in order to capture the filesystem context the remote workspace expects:
 		return r, generalError("Failed to create run", err)
 	}
 
-	// When the lock timeout is set,
-	if op.StateLockTimeout > 0 {
+	// When the lock timeout is set, if the run is still pending and
+	// cancellable after that period, we attempt to cancel it.
+	if lockTimeout := op.StateLocker.Timeout(); lockTimeout > 0 {
 		go func() {
 			select {
 			case <-stopCtx.Done():
 				return
 			case <-cancelCtx.Done():
 				return
-			case <-time.After(op.StateLockTimeout):
+			case <-time.After(lockTimeout):
 				// Retrieve the run to get its current status.
 				r, err := b.client.Runs.Read(cancelCtx, r.ID)
 				if err != nil {
